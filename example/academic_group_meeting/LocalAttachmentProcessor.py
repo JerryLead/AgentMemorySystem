@@ -16,23 +16,37 @@ import numpy as np
 import io
 from academic_group_meeting_graph import NamespaceType, AcademicDataType
 
+import os
+import PyPDF2
+from pathlib import Path
+
+# 定义附件目录常量
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ATTACHMENT_DIR = os.path.join(BASE_DIR, "attachment")
+PDF_DIR = os.path.join(ATTACHMENT_DIR, "papers")
+IMAGE_DIR = os.path.join(ATTACHMENT_DIR, "images")
+
+# 确保附件目录存在
+os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
 class LocalAttachmentProcessor:
     """处理本地附件文件（PDF和图像）并添加到语义图中的类"""
     
-    def __init__(self, attachment_dir: str = "./semantic_map_case/academic_group_meeting/attachment"):
+    def __init__(self):
         """
         初始化本地附件处理器
-        
-        Args:
-            attachment_dir: 附件存储目录路径
         """
-        self.attachment_dir = attachment_dir
+        self.attachment_dir = ATTACHMENT_DIR
+        self.pdf_dir = PDF_DIR
+        self.image_dir = IMAGE_DIR
         
         # 确保目录存在
-        if not os.path.exists(attachment_dir):
-            print(f"警告: 附件目录 '{attachment_dir}' 不存在")
+        if not os.path.exists(self.attachment_dir):
+            print(f"警告: 附件目录 '{self.attachment_dir}' 不存在")
         else:
-            print(f"找到附件目录: '{attachment_dir}'")
+            print(f"找到附件目录: '{self.attachment_dir}'")
         
         # 支持的文件类型
         self.pdf_extensions = ['.pdf']

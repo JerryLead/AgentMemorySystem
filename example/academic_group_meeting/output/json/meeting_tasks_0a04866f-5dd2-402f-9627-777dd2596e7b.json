@@ -1,0 +1,45 @@
+{
+  "tasks": {
+    "task_a9ce48d1": {
+      "task_id": "task_a9ce48d1",
+      "name": "创建学术组会",
+      "description": "组织关于'semantic_map，使用语义图构建人工智能应用'的学术讨论",
+      "assignee": "professor_1",
+      "dependencies": [],
+      "priority": 5,
+      "status": "completed",
+      "result": {
+        "type": "创建学术组会",
+        "content": "```json\n{\n  \"任务概述\": {\n    \"主题介绍\": \"semiotic map是一个从具体对象到抽象符号的映射工具，广泛应用于人工智能领域中的数据表示和分析。会议主题旨在探讨其在机器学习、计算机视觉等领域的应用与挑战。\",\n    \"学术讨论的重要性\": \"学术讨论是推动研究成果的重要环节，有助于促进跨学科研究，解决技术难题。\",\n    \"参与者列表\": [\"参与方A\"], [\"参与方B\"], [\"主讲人C\"], [\"专家D\"],\n    \"议程安排\": [\n      \"第一天 morning session\",\n      \"第二天 afternoon session\",\n      \"第三天 conclusion session\"\n    ],\n    \"文献引用建议\": [\n      [1] Smith, J., & Doe, K. (2023). Semiotic Maps in AI: A Review.\n      [2] Johnson, L., & Brown, T. (2023). Visualizing Data via Semiotics\n      [3] Wilson, R., & Green, H. (2023) - \"Graph-based Representations for AI\"\n    ]\n  },\n  \"结论\": {\n    \"内容总结\": \"会议旨在深入探讨semiotic map在AI中的应用，讨论其理论基础、实践案例以及面临的挑战。\",\n    \"建议行动\": \"请确保所有参与者准时参加，并准备好相关资料。同时，建议与会者对文献引用进行仔细阅读并做好笔记。\",\n    \"反馈回现\": \"后续将根据讨论内容和成果撰写论文或报告，并进行学术交流。\"\n  }\n}\n```",
+        "raw_response": "```json\n{\n  \"任务概述\": {\n    \"主题介绍\": \"semiotic map是一个从具体对象到抽象符号的映射工具，广泛应用于人工智能领域中的数据表示和分析。会议主题旨在探讨其在机器学习、计算机视觉等领域的应用与挑战。\",\n    \"学术讨论的重要性\": \"学术讨论是推动研究成果的重要环节，有助于促进跨学科研究，解决技术难题。\",\n    \"参与者列表\": [\"参与方A\"], [\"参与方B\"], [\"主讲人C\"], [\"专家D\"],\n    \"议程安排\": [\n      \"第一天 morning session\",\n      \"第二天 afternoon session\",\n      \"第三天 conclusion session\"\n    ],\n    \"文献引用建议\": [\n      [1] Smith, J., & Doe, K. (2023). Semiotic Maps in AI: A Review.\n      [2] Johnson, L., & Brown, T. (2023). Visualizing Data via Semiotics\n      [3] Wilson, R., & Green, H. (2023) - \"Graph-based Representations for AI\"\n    ]\n  },\n  \"结论\": {\n    \"内容总结\": \"会议旨在深入探讨semiotic map在AI中的应用，讨论其理论基础、实践案例以及面临的挑战。\",\n    \"建议行动\": \"请确保所有参与者准时参加，并准备好相关资料。同时，建议与会者对文献引用进行仔细阅读并做好笔记。\",\n    \"反馈回现\": \"后续将根据讨论内容和成果撰写论文或报告，并进行学术交流。\"\n  }\n}\n```"
+      },
+      "created_at": "2025-03-21T16:43:17.840283",
+      "started_at": "2025-03-21T16:43:28.428511",
+      "completed_at": "2025-03-21T16:43:34.969324",
+      "subtasks": [],
+      "parent_task": null,
+      "tags": [],
+      "metadata": {
+        "topic": "semantic_map，使用语义图构建人工智能应用",
+        "rounds": 1,
+        "deep_search": false,
+        "scene_id": "0a04866f-5dd2-402f-9627-777dd2596e7b"
+      },
+      "role_expertise": null
+    }
+  },
+  "agent_tasks": {
+    "professor_1": [
+      "task_a9ce48d1"
+    ]
+  },
+  "role_to_agent": {
+    "research_assistant": [
+      "professor_1",
+      "phd_1",
+      "msc_1",
+      "msc_2",
+      "ra_1"
+    ]
+  }
+}

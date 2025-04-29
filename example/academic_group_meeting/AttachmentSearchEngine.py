@@ -14,13 +14,25 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from academic_group_meeting_graph import NamespaceType, AcademicDataType
 
+import PyPDF2
+from pathlib import Path
+
+# 定义附件目录常量
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ATTACHMENT_DIR = os.path.join(BASE_DIR, "attachment")
+PDF_DIR = os.path.join(ATTACHMENT_DIR, "papers")
+IMAGE_DIR = os.path.join(ATTACHMENT_DIR, "images")
+
+# 确保附件目录存在
+os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
+os.makedirs(IMAGE_DIR, exist_ok=True)
 
 class AttachmentSearchEngine:
     """学术附件检索引擎，用于检索和管理与学术主题相关的论文和图片"""
     
     def __init__(self, 
                  google_api_key: str = "8f64071da03e8c43e87abbeda944fa11d8111ee823294121ad91380c938c1717",
-                 attachment_dir: str = "./attachments",
                  max_papers: int = 5,
                  max_images: int = 3):
         """
@@ -28,12 +40,13 @@ class AttachmentSearchEngine:
         
         Args:
             google_api_key: Google搜索API密钥
-            attachment_dir: 附件存储目录
             max_papers: 每次检索最大论文数量
             max_images: 每次检索最大图片数量
         """
         self.google_api_key = google_api_key
-        self.attachment_dir = attachment_dir
+        self.attachment_dir = ATTACHMENT_DIR
+        self.pdf_dir = PDF_DIR
+        self.image_dir = IMAGE_DIR
         self.max_papers = max_papers
         self.max_images = max_images
         self.headers = {
@@ -41,9 +54,9 @@ class AttachmentSearchEngine:
         }
         
         # 确保附件目录存在
-        os.makedirs(attachment_dir, exist_ok=True)
-        os.makedirs(os.path.join(attachment_dir, "papers"), exist_ok=True)
-        os.makedirs(os.path.join(attachment_dir, "images"), exist_ok=True)
+        os.makedirs(self.attachment_dir, exist_ok=True)
+        os.makedirs(self.pdf_dir, exist_ok=True)
+        os.makedirs(self.image_dir, exist_ok=True)
     
     def search_papers(self, query: str, max_results: int = None) -> List[Dict]:
         """
@@ -198,7 +211,7 @@ class AttachmentSearchEngine:
                 
             # 构建保存路径
             filename = f"{paper_id}.pdf"
-            save_path = os.path.join(self.attachment_dir, "papers", filename)
+            save_path = os.path.join(self.pdf_dir, filename)
             
             # 检查文件是否已存在
             if os.path.exists(save_path):
@@ -240,7 +253,7 @@ class AttachmentSearchEngine:
                 
             # 构建保存路径
             filename = f"{image_id}.jpg"
-            save_path = os.path.join(self.attachment_dir, "images", filename)
+            save_path = os.path.join(self.image_dir, filename)
             
             # 检查文件是否已存在
             if os.path.exists(save_path):

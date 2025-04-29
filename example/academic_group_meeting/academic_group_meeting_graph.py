@@ -5,7 +5,7 @@ from serpapi import GoogleSearch
 from bs4 import BeautifulSoup
 import re
 import requests
-from semantic_data_structure.deepseek_client import deepseek_remote, deepseek_local
+from semantic_map.deepseek_client import deepseek_remote, deepseek_local
 from sentence_transformers import SentenceTransformer
 import uuid
 import time
@@ -14,9 +14,9 @@ from typing import List, Dict , Set, Tuple, Any
 import matplotlib.pyplot as plt
 import networkx as nx
 from matplotlib.font_manager import FontProperties
-from semantic_data_structure.data_type import BaseDataType
-from semantic_data_structure.semantic_map import BaseSemanticMap
-from semantic_data_structure.semantic_simple_graph import BaseSemanticSimpleGraph
+from semantic_map.data_type import BaseDataType
+from semantic_map.semantic_map import BaseSemanticMap
+from semantic_map.semantic_simple_graph import BaseSemanticSimpleGraph
 from enum import auto
 import numpy as np
 # from academic_group_meeting_backend import AcademicMeetingSystem
@@ -25,6 +25,13 @@ import numpy as np
 from matplotlib import pyplot as plt
 from enum import Enum, auto
 
+try:
+    plt.rcParams['font.family'] = 'WenQuanYi Micro Hei'
+    # plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+    plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
+except:
+    print("警告：可能无法正确显示中文，请安装相应字体")
+
 # 在AcademicDataType类之后添加
 class NamespaceType(Enum):
     """学术组会系统的命名空间分类"""
@@ -32,11 +39,16 @@ class NamespaceType(Enum):
     ATTACHMENT = auto() # 附件命名空间：包含论文、研究资料等
     USER = auto()       # 用户命名空间：包含教授、博士生、硕士生等人员
     TASK = auto()       # 任务命名空间：包含研究主题、任务等
+    SUMMARY = auto()    # 总结命名空间：包含教授的轮次总结、最终总结等
 
 # plt.rc('font',family='YouYuan') # 设置中文显示
 # plt.rc('SimHei') # 设置中文显示
-plt.rcParams["font.sans-serif"] = ["SimHei"]  # 设置字体
-plt.rcParams["axes.unicode_minus"] = False  # 正常显示负号
+try:
+    plt.rcParams['font.family'] = 'WenQuanYi Micro Hei'
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 用来正常显示中文标签
+    plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
+except:
+    print("警告：可能无法正确显示中文，请安装相应字体")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -85,6 +97,9 @@ class AcademicDataType(BaseDataType):
     Reference = auto()     # 参考文献
     Conclusion = auto()    # 结论
     Presentation = auto()  # 演讲/报告
+    Summary = auto()       # 教授的总结（轮次总结、最终总结）
+    Task = auto()          # 任务（后续工作、研究方向）
+    Attachment = auto()   # 附件（论文、研究资料等）
 
 class AcademicRole:
     """学术角色定义，包含角色特点和专业领域"""
@@ -99,18 +114,230 @@ class AcademicRole:
         return f"{self.role_type}，专业领域：{specialty_str}。{self.personality}"
 
 
+# class AcademicSearchEngine:
+#     """学术搜索引擎，提供网络检索功能"""
+#     def __init__(self, google_api_key: str = "8f64071da03e8c43e87abbeda944fa11d8111ee823294121ad91380c938c1717",
+#                  llm_api_key:str="sk-fbab400c86184b0daf9bd59467d35772",):
+#         self.google_api_key = google_api_key
+#         self.headers = {
+#             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+#         }
+#         self.llm_client = deepseek_remote(llm_api_key)
+        
+#     def search(self, query: str, num_results: int = 3) -> List[Dict]:
+#         """进行学术检索，返回搜索结果"""
+#         try:
+#             params = {
+#                 "engine": "google",
+#                 "q": query,
+#                 "api_key": self.google_api_key,
+#                 "num": str(num_results),
+#                 "hl": "zh-cn",
+#                 "gl": "cn"
+#             }
+#             search = GoogleSearch(params)
+#             results = search.get_dict()
+            
+#             # 提取有用的搜索结果
+#             if "organic_results" in results:
+#                 return results["organic_results"]
+#             else:
+#                 return []
+#         except Exception as e:
+#             print(f"搜索API调用失败: {str(e)}")
+#             return []
+            
+#     def fetch_webpage_content(self, url: str, max_length: int = 10000) -> str:
+#         """从URL获取网页内容，改进版本增强了错误处理
+        
+#         Args:
+#             url: 网页URL
+#             max_length: 提取内容的最大字符数
+            
+#         Returns:
+#             str: 提取的网页文本内容
+#         """
+#         try:
+#             # URL检查和规范化
+#             if not url or not url.startswith(('http://', 'https://')):
+#                 return f"无效URL: {url}"
+                
+#             # 过滤不支持的文件类型
+#             if url.lower().endswith(('.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx')):
+#                 return f"不支持直接提取文档格式: {url}，请访问链接查看内容。"
+            
+#             # 更长的超时设置
+#             response = requests.get(
+#                 url, 
+#                 headers=self.headers, 
+#                 timeout=15, 
+#                 stream=True,  # 使用流式请求
+#                 verify=True   # 验证SSL证书
+#             )
+#             response.raise_for_status()  # 检查请求是否成功
+            
+#             # 检查内容类型
+#             content_type = response.headers.get('Content-Type', '')
+#             if 'text/html' not in content_type and 'application/json' not in content_type:
+#                 return f"不支持的内容类型: {content_type}，请直接访问链接查看内容。"
+            
+#             # 使用BeautifulSoup解析HTML
+#             soup = BeautifulSoup(response.content, 'html.parser')
+            
+#             # 移除可能干扰的元素
+#             for tag in soup(['script', 'style', 'nav', 'footer', 'iframe', 'head', 'aside', 'noscript']):
+#                 tag.decompose()
+            
+#             # 提取主要文本内容
+#             text = soup.get_text(separator=' ', strip=True)
+            
+#             # 清理文本：移除多余空白和特殊字符
+#             text = re.sub(r'\s+', ' ', text).strip()
+#             text = re.sub(r'[\x00-\x1F\x7F]', ' ', text)  # 移除控制字符
+            
+#             # 限制文本长度
+#             if len(text) > max_length:
+#                 text = text[:max_length] + "..."
+            
+#             # 检查内容是否为空
+#             if not text.strip():
+#                 return f"从{url}提取的内容为空，请直接访问链接查看。"
+                
+#             return text
+#         except requests.exceptions.Timeout:
+#             return f"获取网页内容超时 ({url})：请考虑直接访问网页查看内容。"
+#         except requests.exceptions.SSLError:
+#             return f"SSL证书验证失败 ({url})：可能是安全连接问题。"
+#         except requests.exceptions.ConnectionError:
+#             return f"连接失败 ({url})：无法连接到服务器。"
+#         except requests.exceptions.HTTPError as e:
+#             return f"HTTP错误 ({url}): {e.response.status_code} - {e.response.reason}"
+#         except Exception as e:
+#             return f"抓取网页内容时发生错误 ({url}): {str(e)}"
+    
+#     def enrich_search_results(self, results: List[Dict], fetch_content: bool = True) -> List[Dict]:
+#         """增强搜索结果，可选择性地获取网页内容
+        
+#         Args:
+#             results: 原始搜索结果列表
+#             fetch_content: 是否获取完整网页内容
+            
+#         Returns:
+#             List[Dict]: 增强后的搜索结果
+#         """
+#         enriched_results = []
+        
+#         for result in results:
+#             enriched_result = {
+#                 "title": result.get("title", ""),
+#                 "url": result.get("link", ""),
+#                 "snippet": result.get("snippet", ""),
+#                 "date": result.get("date", ""),
+#                 "source": result.get("source", "")
+#             }
+            
+#             if fetch_content and "link" in result:
+#                 # 添加短暂延迟避免过快发送请求
+#                 time.sleep(1)
+#                 content = self.fetch_webpage_content(result["link"])
+#                 enriched_result["full_content"] = content
+                
+#             enriched_results.append(enriched_result)
+            
+#         return enriched_results
+    
+#     def prepare_content_for_llm(self, query: str, include_full_content: bool = False) -> str:
+#         """准备适合LLM处理的内容
+        
+#         Args:
+#             query: 搜索查询
+#             include_full_content: 是否包含完整网页内容
+            
+#         Returns:
+#             str: 格式化后适合LLM的文本
+#         """
+#         search_results = self.search(query)
+#         enriched_results = self.enrich_search_results(
+#             search_results, 
+#             fetch_content=include_full_content
+#         )
+        
+#         prompt = f'以下是关于"{query}"的搜索结果:\n\n'
+        
+#         for i, result in enumerate(enriched_results, 1):
+#             prompt += f"【搜索结果 {i}】\n"
+#             prompt += f"标题: {result['title']}\n"
+#             prompt += f"来源: {result.get('source', '未知')} {result.get('date', '')}\n"
+#             prompt += f"URL: {result['url']}\n"
+#             prompt += f"摘要: {result['snippet']}\n"
+            
+#             if include_full_content and "full_content" in result:
+#                 # 如果内容太长，可能需要截断
+#                 content_preview = result["full_content"][:2000] + "..." if len(result["full_content"]) > 2000 else result["full_content"]
+#                 prompt += f"网页内容: {content_preview}\n"
+                
+#             prompt += "\n" + "-"*50 + "\n\n"
+            
+#         prompt += "请基于以上信息，提供关于该主题的全面分析和见解。"
+#         return prompt
+    
+#     def search_and_analyze(self, query: str, include_full_content: bool = False) -> Dict:
+#         """搜索并分析结果
+        
+#         Args:
+#             query: 搜索查询
+#             include_full_content: 是否包含完整网页内容
+#             llm_client: LLM客户端对象
+            
+#         Returns:
+#             Dict: 包含原始搜索结果和LLM分析的字典
+#         """
+#         if not self.llm_client:
+#             return {"error": "未提供LLM客户端"}
+            
+#         # 准备适合LLM的内容
+#         prompt = self.prepare_content_for_llm(query, include_full_content)
+        
+#         # 使用LLM处理
+#         messages = [
+#             {"role": "system", "content": "你是一位专业的学术研究助手，擅长整合网络信息并提供深入分析。"},
+#             {"role": "user", "content": prompt}
+#         ]
+        
+#         # 调用LLM获取响应
+#         response = self.llm_client.get_response(messages)
+        
+#         return {
+#             "query": query,
+#             "prompt": prompt,
+#             "analysis": response
+#         }
 class AcademicSearchEngine:
     """学术搜索引擎，提供网络检索功能"""
-    def __init__(self, google_api_key: str = "",
-                 llm_api_key:str="",):
+    def __init__(self, google_api_key: str = "8f64071da03e8c43e87abbeda944fa11d8111ee823294121ad91380c938c1717",
+                 llm_api_key:str="sk-fbab400c86184b0daf9bd59467d35772",
+                 timeout: int = 3):  # 添加默认超时参数
         self.google_api_key = google_api_key
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         self.llm_client = deepseek_remote(llm_api_key)
+        self.timeout = timeout  # 存储默认超时时间
         
-    def search(self, query: str, num_results: int = 3) -> List[Dict]:
-        """进行学术检索，返回搜索结果"""
+    def search(self, query: str, num_results: int = 3, timeout: int = None) -> List[Dict]:
+        """进行学术检索，返回搜索结果
+        
+        Args:
+            query: 搜索查询
+            num_results: 返回结果数量
+            timeout: 超时时间(秒)，默认使用实例初始化时设置的timeout值
+            
+        Returns:
+            List[Dict]: 搜索结果列表，超时时返回包含超时信息的列表
+        """
+        # 使用指定的超时时间，若未指定则使用实例默认值
+        actual_timeout = timeout if timeout is not None else self.timeout
+        
         try:
             params = {
                 "engine": "google",
@@ -118,30 +345,49 @@ class AcademicSearchEngine:
                 "api_key": self.google_api_key,
                 "num": str(num_results),
                 "hl": "zh-cn",
-                "gl": "cn"
+                "gl": "cn",
+                "timeout": actual_timeout  # 添加超时参数
             }
-            search = GoogleSearch(params)
-            results = search.get_dict()
             
-            # 提取有用的搜索结果
-            if "organic_results" in results:
-                return results["organic_results"]
-            else:
-                return []
+            # 使用自定义超时进行API调用
+            import socket
+            # 保存原始超时设置
+            original_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(actual_timeout)
+            
+            try:
+                search = GoogleSearch(params)
+                results = search.get_dict()
+                
+                # 提取有用的搜索结果
+                if "organic_results" in results:
+                    return results["organic_results"]
+                else:
+                    return []
+            finally:
+                # 恢复原始超时设置
+                socket.setdefaulttimeout(original_timeout)
+                
         except Exception as e:
-            print(f"搜索API调用失败: {str(e)}")
-            return []
+            print(f"搜索API调用失败 (超时:{actual_timeout}秒): {str(e)}")
+            return [{"title": "搜索超时", 
+                     "link": "", 
+                     "snippet": f"搜索请求超时({actual_timeout}秒)，请稍后再试。"}]
             
-    def fetch_webpage_content(self, url: str, max_length: int = 10000) -> str:
-        """从URL获取网页内容，改进版本增强了错误处理
+    def fetch_webpage_content(self, url: str, max_length: int = 10000, timeout: int = None) -> str:
+        """从URL获取网页内容，改进版本增强了错误处理和超时设置
         
         Args:
             url: 网页URL
             max_length: 提取内容的最大字符数
+            timeout: 超时时间(秒)，默认使用实例初始化时设置的timeout值
             
         Returns:
-            str: 提取的网页文本内容
+            str: 提取的网页文本内容，超时返回超时信息
         """
+        # 使用指定的超时时间，若未指定则使用实例默认值
+        actual_timeout = timeout if timeout is not None else self.timeout
+        
         try:
             # URL检查和规范化
             if not url or not url.startswith(('http://', 'https://')):
@@ -151,11 +397,11 @@ class AcademicSearchEngine:
             if url.lower().endswith(('.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx')):
                 return f"不支持直接提取文档格式: {url}，请访问链接查看内容。"
             
-            # 更长的超时设置
+            # 使用设置的超时时间
             response = requests.get(
                 url, 
                 headers=self.headers, 
-                timeout=15, 
+                timeout=actual_timeout,  # 使用设置的超时时间
                 stream=True,  # 使用流式请求
                 verify=True   # 验证SSL证书
             )
@@ -190,7 +436,7 @@ class AcademicSearchEngine:
                 
             return text
         except requests.exceptions.Timeout:
-            return f"获取网页内容超时 ({url})：请考虑直接访问网页查看内容。"
+            return f"获取网页内容超时 ({url})：请求超过{actual_timeout}秒，未能获取内容。"
         except requests.exceptions.SSLError:
             return f"SSL证书验证失败 ({url})：可能是安全连接问题。"
         except requests.exceptions.ConnectionError:
@@ -200,12 +446,13 @@ class AcademicSearchEngine:
         except Exception as e:
             return f"抓取网页内容时发生错误 ({url}): {str(e)}"
     
-    def enrich_search_results(self, results: List[Dict], fetch_content: bool = True) -> List[Dict]:
+    def enrich_search_results(self, results: List[Dict], fetch_content: bool = True, timeout: int = None) -> List[Dict]:
         """增强搜索结果，可选择性地获取网页内容
         
         Args:
             results: 原始搜索结果列表
             fetch_content: 是否获取完整网页内容
+            timeout: 超时时间(秒)，默认使用实例初始化时设置的timeout值
             
         Returns:
             List[Dict]: 增强后的搜索结果
@@ -224,27 +471,29 @@ class AcademicSearchEngine:
             if fetch_content and "link" in result:
                 # 添加短暂延迟避免过快发送请求
                 time.sleep(1)
-                content = self.fetch_webpage_content(result["link"])
+                content = self.fetch_webpage_content(result["link"], timeout=timeout)
                 enriched_result["full_content"] = content
                 
             enriched_results.append(enriched_result)
             
         return enriched_results
     
-    def prepare_content_for_llm(self, query: str, include_full_content: bool = False) -> str:
+    def prepare_content_for_llm(self, query: str, include_full_content: bool = False, timeout: int = None) -> str:
         """准备适合LLM处理的内容
         
         Args:
             query: 搜索查询
             include_full_content: 是否包含完整网页内容
+            timeout: 超时时间(秒)，默认使用实例初始化时设置的timeout值
             
         Returns:
             str: 格式化后适合LLM的文本
         """
-        search_results = self.search(query)
+        search_results = self.search(query, timeout=timeout)
         enriched_results = self.enrich_search_results(
             search_results, 
-            fetch_content=include_full_content
+            fetch_content=include_full_content,
+            timeout=timeout
         )
         
         prompt = f'以下是关于"{query}"的搜索结果:\n\n'
@@ -266,13 +515,13 @@ class AcademicSearchEngine:
         prompt += "请基于以上信息，提供关于该主题的全面分析和见解。"
         return prompt
     
-    def search_and_analyze(self, query: str, include_full_content: bool = False) -> Dict:
+    def search_and_analyze(self, query: str, include_full_content: bool = False, timeout: int = None) -> Dict:
         """搜索并分析结果
         
         Args:
             query: 搜索查询
             include_full_content: 是否包含完整网页内容
-            llm_client: LLM客户端对象
+            timeout: 超时时间(秒)，默认使用实例初始化时设置的timeout值
             
         Returns:
             Dict: 包含原始搜索结果和LLM分析的字典
@@ -281,7 +530,7 @@ class AcademicSearchEngine:
             return {"error": "未提供LLM客户端"}
             
         # 准备适合LLM的内容
-        prompt = self.prepare_content_for_llm(query, include_full_content)
+        prompt = self.prepare_content_for_llm(query, include_full_content, timeout=timeout)
         
         # 使用LLM处理
         messages = [
@@ -415,10 +664,18 @@ class AcademicGroupMeetingMap(BaseSemanticMap):
                     raise RuntimeError("无法加载任何文本嵌入模型")
     
     def _get_text_embedding(self, text: str):
-        """获取文本的向量表示"""
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("文本必须是非空字符串")
-            
+        """获取文本的向量表示，优化错误处理"""
+        # 验证输入文本
+        if not text or not isinstance(text, str):
+            print("警告：嵌入生成收到无效文本，使用默认文本代替")
+            text = "默认文本内容用于生成嵌入向量"
+        
+        # 截断超长文本，模型通常有输入长度限制
+        max_length = 8000
+        if len(text) > max_length:
+            print(f"文本长度超过限制({len(text)} > {max_length})，将被截断")
+            text = text[:max_length]
+        
         try:
             # 使用加载的模型获取嵌入
             emb = self.text_model.encode(text)
@@ -557,7 +814,8 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             NamespaceType.DIALOGUE: set(),
             NamespaceType.ATTACHMENT: set(),
             NamespaceType.USER: set(),
-            NamespaceType.TASK: set()
+            NamespaceType.TASK: set(),
+            NamespaceType.SUMMARY: set()
         }
         
         # 数据类型到命名空间的映射
@@ -569,6 +827,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             
             # 任务命名空间
             AcademicDataType.ResearchTopic: NamespaceType.TASK,
+            AcademicDataType.Task: NamespaceType.TASK,
             
             # 对话命名空间
             AcademicDataType.Question: NamespaceType.DIALOGUE,
@@ -578,7 +837,10 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             # 附件命名空间
             AcademicDataType.Paper: NamespaceType.ATTACHMENT,
             AcademicDataType.Reference: NamespaceType.ATTACHMENT,
-            AcademicDataType.Presentation: NamespaceType.ATTACHMENT
+            AcademicDataType.Presentation: NamespaceType.ATTACHMENT,
+            
+            # 总结命名空间
+            AcademicDataType.Summary: NamespaceType.SUMMARY
         }
         
         # 子图数据结构
@@ -586,7 +848,8 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             NamespaceType.DIALOGUE: {"nodes": set(), "edges": []},
             NamespaceType.ATTACHMENT: {"nodes": set(), "edges": []},
             NamespaceType.USER: {"nodes": set(), "edges": []}, 
-            NamespaceType.TASK: {"nodes": set(), "edges": []}
+            NamespaceType.TASK: {"nodes": set(), "edges": []},
+            NamespaceType.SUMMARY: {"nodes": set(), "edges": []}
         }
 
     def add_node(self, key: str, value: dict, datatype: BaseDataType, 
@@ -602,7 +865,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             parent_relation: 与父节点的关系类型
         """
         # 调用原始方法添加节点到语义图
-        self.semantic_data_structure.insert(key, value, datatype)
+        self.semantic_map.insert(key, value, datatype)
         self._ensure_node(key)
         
         # 分配节点到对应命名空间
@@ -618,7 +881,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
                 # 获取父节点数据类型
                 parent_data = None
                 parent_type = None
-                for k, v, dt, _ in self.semantic_data_structure.data:
+                for k, v, dt, _ in self.semantic_map.data:
                     if k == parent:
                         parent_data = v
                         parent_type = dt
@@ -645,6 +908,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
                         # 跨命名空间的边，添加到两个子图
                         self.sub_graphs[parent_namespace]["edges"].append((parent, key, relation))
                         self.sub_graphs[namespace]["edges"].append((parent, key, relation))
+                        
     def _determine_relation_type(self, parent_type, child_type, parent_id, child_id):
         """根据节点类型确定更具体的关系类型"""
         # 用户 -> 对话关系
@@ -655,13 +919,20 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
                 return "提问"
             elif child_type == AcademicDataType.Conclusion:
                 return "总结"
-                
+            # 添加任务分配关系
+            elif child_type == AcademicDataType.Task:
+                return "分配任务"
         # 任务 -> 用户关系
+        if parent_type == AcademicDataType.Task:
+            if child_type in [AcademicDataType.Professor, AcademicDataType.PhD, AcademicDataType.Master]:
+                return "执行者"   
+                 
+        # 话题 -> 用户关系
         if parent_type == AcademicDataType.ResearchTopic:
             if child_type in [AcademicDataType.Professor, AcademicDataType.PhD, AcademicDataType.Master]:
                 return "参与者"
                 
-        # 任务 -> 对话关系
+        # 话题 -> 对话关系
         if parent_type == AcademicDataType.ResearchTopic:
             if child_type in [AcademicDataType.Discussion, AcademicDataType.Question]:
                 return "相关讨论"
@@ -678,6 +949,30 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             elif child_type == AcademicDataType.Conclusion:
                 return "引出"
                 
+        # 总结 -> 对话关系
+        if parent_type == AcademicDataType.Summary:
+            if child_type in [AcademicDataType.Discussion, AcademicDataType.Question]:
+                return "总结"
+        
+        # 对话 -> 总结关系
+        if child_type == AcademicDataType.Summary:
+            if parent_type in [AcademicDataType.Discussion, AcademicDataType.Question]:
+                return "被总结"
+                
+        # 任务 -> 总结关系
+        if parent_type == AcademicDataType.Summary:
+            if child_type == AcademicDataType.Task:
+                return "产生任务"
+                
+        # 总结 -> 任务关系
+        if child_type == AcademicDataType.Summary:
+            if parent_type == AcademicDataType.Task:
+                return "来源于总结"
+            
+        # 任务之间的依赖关系
+        if parent_type == AcademicDataType.Task and child_type == AcademicDataType.Task:
+            return "依赖于"
+                
         return "关联"
     
     def get_namespace_nodes(self, namespace: NamespaceType) -> List[str]:
@@ -687,7 +982,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
     def get_node_namespace(self, node_id: str) -> NamespaceType:
         """获取节点所属的命名空间"""
         for namespace, nodes in self.namespace_nodes.items():
-            if node_id in nodes:
+            if (node_id in nodes):
                 return namespace
         return None
     
@@ -741,19 +1036,18 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
                     self.sub_graphs[src_namespace]["edges"].append(edge)
                     self.sub_graphs[dst_namespace]["edges"].append(edge)
     
-    def visualize_namespaces(self, title="学术组会命名空间关系图", fontpath=None):
-        """可视化命名空间分组的学术组会图"""
-        plt.figure(figsize=(18, 14))
-        
-        # 创建NetworkX图
-        G = nx.DiGraph()
+    def visualize_namespaces(self, title="学术组会命名空间关系图", fontpath=None, output_filename="academic_meeting_namespaces.png"):
+        """改进的命名空间可视化方法"""
+        # 使用通用设置
+        G = self._common_visualization_setup(title)
         
         # 命名空间颜色映射
         namespace_colors = {
             NamespaceType.USER: "skyblue",
             NamespaceType.DIALOGUE: "lightgreen",
             NamespaceType.ATTACHMENT: "salmon",
-            NamespaceType.TASK: "gold"
+            NamespaceType.TASK: "gold",
+            NamespaceType.SUMMARY: "orchid"  # 为总结命名空间添加颜色
         }
         
         # 命名空间形状映射
@@ -761,7 +1055,8 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             NamespaceType.USER: "o",      # 圆形
             NamespaceType.DIALOGUE: "s",  # 方形
             NamespaceType.ATTACHMENT: "^", # 三角形
-            NamespaceType.TASK: "d"       # 钻石形
+            NamespaceType.TASK: "d",      # 钻石形
+            NamespaceType.SUMMARY: "h"    # 六边形，用于总结
         }
         
         # 添加节点
@@ -774,7 +1069,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             # 获取节点数据
             node_data = None
             node_type = None
-            for k, value, datatype, _ in self.semantic_data_structure.data:
+            for k, value, datatype, _ in self.semantic_map.data:
                 if k == key:
                     node_data = value
                     node_type = datatype
@@ -848,33 +1143,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         pos = nx.spring_layout(G, k=1.5, iterations=50, seed=42)
         
         # 绘制节点
-        for shape in set(node_shapes):
-            # 获取该形状的节点索引
-            node_idx = [i for i, s in enumerate(node_shapes) if s == shape]
-            if not node_idx:
-                continue
-                
-            # 获取节点子集
-            node_subset = [list(G.nodes())[i] for i in node_idx]
-            node_color_subset = [node_colors[i] for i in node_idx]
-            
-            # 绘制节点
-            if shape == "o":
-                nx.draw_networkx_nodes(G, pos, nodelist=node_subset, 
-                                    node_color=node_color_subset, node_shape=shape,
-                                    node_size=800, alpha=0.8)
-            elif shape == "s":
-                nx.draw_networkx_nodes(G, pos, nodelist=node_subset, 
-                                    node_color=node_color_subset, node_shape=shape,
-                                    node_size=700, alpha=0.8)
-            elif shape == "^":
-                nx.draw_networkx_nodes(G, pos, nodelist=node_subset, 
-                                    node_color=node_color_subset, node_shape=shape,
-                                    node_size=900, alpha=0.8)
-            elif shape == "d":
-                nx.draw_networkx_nodes(G, pos, nodelist=node_subset, 
-                                    node_color=node_color_subset, node_shape=shape,
-                                    node_size=800, alpha=0.8)
+        self._setup_node_visualization(G, node_colors, node_shapes, pos)
         
         # 绘制边
         nx.draw_networkx_edges(G, pos, edgelist=edges, width=1.5,
@@ -911,137 +1180,23 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         
         plt.legend(handles=legend_elements, loc='upper right')
         
-        # 设置标题和布局
-        plt.title(title)
-        plt.axis('off')
+        # 设置布局
         plt.tight_layout()
         
         # 保存图片
-        plt.savefig("academic_meeting_namespaces.png", dpi=300)
+        plt.savefig(output_filename, dpi=300)
         plt.close()
         
-        print("已保存命名空间分组的学术组会图")
+        print(f"已保存命名空间分组的学术组会图到: {output_filename}")
 
-    # def add_node(self, key: str, value: dict, datatype: BaseDataType, 
-    #         parent_keys: List[str] = None, parent_relation="link"):
-    #     """
-    #     添加节点并建立父子关系，改进版支持更丰富的关系类型
-        
-    #     Args:
-    #         key: 节点唯一标识
-    #         value: 节点值/数据
-    #         datatype: 数据类型
-    #         parent_keys: 父节点列表
-    #         parent_relation: 与父节点的关系类型
-    #     """
-    #     self.semantic_data_structure.insert(key, value, datatype)
-    #     self._ensure_node(key)
-        
-    #     if parent_keys:
-    #         for parent in parent_keys:
-    #             self._ensure_node(parent)
-                
-    #             # 获取父节点数据类型
-    #             parent_data = None
-    #             parent_type = None
-    #             for k, v, dt, _ in self.semantic_data_structure.data:
-    #                 if k == parent:
-    #                     parent_data = v
-    #                     parent_type = dt
-    #                     break
-                        
-    #             # 智能确定关系类型（如果parent_relation是默认的"link"）
-    #             relation = parent_relation
-    #             if relation == "link" and parent_type and datatype:
-    #                 if parent_type == AcademicDataType.Professor and datatype == AcademicDataType.Discussion:
-    #                     relation = "发言"
-    #                 elif parent_type == AcademicDataType.Professor and datatype == AcademicDataType.Question:
-    #                     relation = "提问"
-    #                 elif parent_type == AcademicDataType.PhD and datatype == AcademicDataType.Discussion:
-    #                     relation = "讨论"
-    #                 elif parent_type == AcademicDataType.Master and datatype == AcademicDataType.Question:
-    #                     relation = "提问"
-    #                 elif datatype == AcademicDataType.Conclusion:
-    #                     relation = "总结"
-    #                 elif (parent_type == AcademicDataType.Discussion or parent_type == AcademicDataType.Question) and datatype == AcademicDataType.Discussion:
-    #                     relation = "回应"
-                    
-    #             # 建立父子关系
-    #             self.graph_relations[parent]["children"][key] = relation
-    #             self.graph_relations[key]["parents"][parent] = relation
-                
-    #             # 添加到NetworkX图
-    #             if hasattr(self, 'relation_nxgraph'):
-    #                 self.relation_nxgraph.add_edge(parent, key, relation=relation)
-                    
-    #     # 添加节点到NetworkX图
-    #     if hasattr(self, 'relation_nxgraph'):
-    #         self.relation_nxgraph.add_node(key, data=value, datatype=datatype)
-
-    # def auto_generate_subgraphs(self):
-    #     """根据节点数据类型自动生成子图"""
-    #     # 初始化子图
-    #     person_graph = {"nodes": set(), "edges": []}
-    #     topic_graph = {"nodes": set(), "edges": []}
-    #     paper_graph = {"nodes": set(), "edges": []}
-    #     discussion_graph = {"nodes": set(), "edges": []}
-        
-    #     # 遍历所有节点
-    #     for key in self.graph_relations:
-    #         node_data = self.semantic_data_structure.get(key)
-    #         if not node_data or "datatype" not in node_data:
-    #             continue
-                
-    #         dt = node_data["datatype"]
-            
-    #         # 基于数据类型分配节点到不同子图
-    #         if dt in [AcademicDataType.Professor, AcademicDataType.PhD, AcademicDataType.Master]:
-    #             person_graph["nodes"].add(key)
-    #             # 添加与此人相关的边
-    #             for child in self.graph_relations[key]["children"]:
-    #                 person_graph["edges"].append((key, child, self.graph_relations[key]["children"][child]))
-    #             for parent in self.graph_relations[key]["parents"]:
-    #                 person_graph["edges"].append((parent, key, self.graph_relations[key]["parents"][parent]))
-                    
-    #         elif dt == AcademicDataType.ResearchTopic:
-    #             topic_graph["nodes"].add(key)
-    #             # 添加与该主题相关的边
-    #             for child in self.graph_relations[key]["children"]:
-    #                 topic_graph["edges"].append((key, child, self.graph_relations[key]["children"][child]))
-    #             for parent in self.graph_relations[key]["parents"]:
-    #                 topic_graph["edges"].append((parent, key, self.graph_relations[key]["parents"][parent]))
-                    
-    #         elif dt == AcademicDataType.Paper:
-    #             paper_graph["nodes"].add(key)
-    #             # 添加与该论文相关的边
-    #             for child in self.graph_relations[key]["children"]:
-    #                 paper_graph["edges"].append((key, child, self.graph_relations[key]["children"][child]))
-    #             for parent in self.graph_relations[key]["parents"]:
-    #                 paper_graph["edges"].append((parent, key, self.graph_relations[key]["parents"][parent]))
-                    
-    #         elif dt in [AcademicDataType.Discussion, AcademicDataType.Question, AcademicDataType.Conclusion]:
-    #             discussion_graph["nodes"].add(key)
-    #             # 添加与该讨论相关的边
-    #             for child in self.graph_relations[key]["children"]:
-    #                 discussion_graph["edges"].append((key, child, self.graph_relations[key]["children"][child]))
-    #             for parent in self.graph_relations[key]["parents"]:
-    #                 discussion_graph["edges"].append((parent, key, self.graph_relations[key]["parents"][parent]))
-        
-    #     # 保存子图
-    #     self.sub_graphs["person"] = person_graph
-    #     self.sub_graphs["topic"] = topic_graph
-    #     self.sub_graphs["paper"] = paper_graph
-    #     self.sub_graphs["discussion"] = discussion_graph
-        
-    #     return self.sub_graphs
     def auto_generate_subgraphs(self):
-        """根据命名空间自动生成子图"""
+        """根据命名空间自动生成子图，优化后的版本"""
         # 重置命名空间节点分配
         for namespace in self.namespace_nodes:
             self.namespace_nodes[namespace] = set()
             
         # 遍历所有节点分配到命名空间
-        for key, value, datatype, _ in self.semantic_data_structure.data:
+        for key, value, datatype, _ in self.semantic_map.data:
             namespace = self.datatype_namespace_map.get(datatype)
             if namespace:
                 self.namespace_nodes[namespace].add(key)
@@ -1059,6 +1214,42 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         print(f"跨命名空间关系: {len(cross_edges)}个")
         
         return self.sub_graphs
+    
+    def _common_visualization_setup(self, title, figsize=(18, 14)):
+        """提取通用的可视化设置代码"""
+        plt.figure(figsize=figsize)
+        plt.title(title, fontsize=16)
+        plt.axis('off')
+        return nx.DiGraph()
+    
+    def _setup_node_visualization(self, G, node_colors, node_shapes, pos, node_size=800, alpha=0.8):
+        """设置节点可视化的通用方法"""
+        for shape in set(node_shapes):
+            # 获取该形状的节点索引
+            node_idx = [i for i, s in enumerate(node_shapes) if s == shape]
+            if not node_idx:
+                continue
+                
+            # 获取节点子集
+            node_subset = [list(G.nodes())[i] for i in node_idx]
+            node_color_subset = [node_colors[i] for i in node_idx]
+            
+            # 根据不同形状调整节点大小
+            size = node_size
+            if shape == "s":  # 方形稍小
+                size = node_size * 0.9
+            elif shape == "^":  # 三角形稍大
+                size = node_size * 1.1
+                
+            # 绘制节点
+            nx.draw_networkx_nodes(
+                G, pos, 
+                nodelist=node_subset, 
+                node_color=node_color_subset, 
+                node_shape=shape,
+                node_size=size, 
+                alpha=alpha
+            )
     
     def visualize_academic_meeting(self, title="学术组会关系图", fontpath=None):
         """
@@ -1079,7 +1270,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         
         # 添加节点和属性
         for key in self.graph_relations:
-            data = self.semantic_data_structure.get(key)
+            data = self.semantic_map.get(key)
             if not data:
                 continue
                 
@@ -1272,8 +1463,8 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         plt.tight_layout()
         
         # 保存和显示
-        plt.savefig(f"academic_meeting_graph.png", dpi=300)
-        plt.show()
+        plt.savefig(f"./semantic_map_case/academic_group_meeting/output/picture/academic_meeting_graph.png", dpi=300)
+        # plt.show()
         print(f"学术组会图已保存为 academic_meeting_graph.png")
 
     def _generate_meaningful_relation(self, src_key, dst_key, src_type, dst_type, default_relation, src_data, dst_data):
@@ -1337,7 +1528,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
                 return "继续发言"
         
         # 如果是研究主题连接到人，返回"参与"
-        if src_type == AcademicDataType.ResearchTopic and (dst_type == AcademicDataType.Professor or
+        if src_type == AcademicDataType.ResearchTopic and(dst_type == AcademicDataType.Professor or
                                                         dst_type == AcademicDataType.PhD or
                                                         dst_type == AcademicDataType.Master):
             return "参与者"
@@ -1354,7 +1545,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         # 获取所有讨论节点
         discussion_nodes = []
         for key in self.graph_relations:
-            node_data = self.semantic_data_structure.get(key)
+            node_data = self.semantic_map.get(key)
             if not node_data:
                 continue
                 
@@ -1370,7 +1561,7 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
         # 创建流程图
         flow = []
         for key, _ in discussion_nodes:
-            node_data = self.semantic_data_structure.get(key)
+            node_data = self.semantic_map.get(key)
             if not node_data:
                 continue
                 
@@ -1387,4 +1578,4 @@ class AcademicGroupMeetingGraph(BaseSemanticSimpleGraph):
             })
         
         return flow
-    
+
