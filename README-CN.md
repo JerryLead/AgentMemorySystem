@@ -235,6 +235,20 @@ AcademicSemanticGraph
   )
   ```
 - **跨会议溯源**：通过时间线视图追踪研究思路演进
+- **强大的数据库连接能力**：可选连接neo4j和milvus，分别存储知识图谱和对话信息
+
+#### 使用指南
+
+  这个示例包含一个前端，您可以很方便地通过网页访问并使用
+
+- **环境配置**:
+  ```bash
+  pip install requirements.txt
+
+- **运行前端**:
+  ```bash
+  cd ./example/academic_group_meeting/front_end
+  streamlit run front_end.py
 
 ### 3. [Arxiv论文智能问答系统](example/arxiv_QA_system)
 

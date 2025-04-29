@@ -241,6 +241,22 @@ AcademicSemanticGraph
     )
     ```
   - **Cross-Meeting Traceability**: Tracks the evolution of research ideas through a timeline view.
+  - **database connect**: connect to the milvus and neo4j.Store and remember your data while you perform academic group meeting. 
+
+#### Usage Guide
+
+  This example has a front end, you can view it on the website.
+
+- **Installation**:
+  ```bash
+  pip install requirements.txt
+
+- **Running the Frontend**:
+  ```bash
+  cd ./example/academic_group_meeting/front_end
+  streamlit run front_end.py
+
+
 
 ### 3. [Arxiv Paper Intelligent Q&A System](example/arxiv_QA_system)
 
