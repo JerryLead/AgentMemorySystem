@@ -220,7 +220,8 @@ AcademicSemanticGraph
 │   ├── Participant Node: Professor/PhD Student/Master Student
 │   ├── Research Topic Node: Contains domain keywords and technical routes
 │   ├── Discussion Node: Speech content and timestamp
-│   └── Attachment Node: Paper/Presentation/Dataset
+│   ├── Attachment Node: Paper/Presentation/Dataset
+│   └── Task Node: The assigned task
 └── Relationship Types:
     ├── Speaks: Participant → Discussion Node
     ├── Cites: Discussion Node → Paper Node
@@ -241,7 +242,7 @@ AcademicSemanticGraph
     )
     ```
   - **Cross-Meeting Traceability**: Tracks the evolution of research ideas through a timeline view.
-  - **database connect**: connect to the milvus and neo4j.Store and remember your data while you perform academic group meeting. 
+  - **Database connect**: Connect to the milvus and neo4j. Store and remember your data while you perform academic group meeting. 
 
 #### Usage Guide
 
@@ -256,6 +257,11 @@ AcademicSemanticGraph
   cd ./example/academic_group_meeting/front_end
   streamlit run front_end.py
 
+#### demo pictures
+
+![alt text](images/demo.png)
+
+![alt text](images/attachment.png)
 
 
 ### 3. [Arxiv Paper Intelligent Q&A System](example/arxiv_QA_system)
