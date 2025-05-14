@@ -1027,6 +1027,11 @@ if __name__ == '__main__':
     
     # 为简单起见，假设使用默认模型和维度
     semantic_map = SemanticMap(embedding_dim=512)
+    semantic_map = SemanticMap(
+        image_embedding_model_name="/home/zyh/model/clip-ViT-B-32",
+        text_embedding_model_name="/home/zyh/model/clip-ViT-B-32-multilingual-v1",
+        embedding_dim=512
+        )
 
     # 2. 创建和添加 MemoryUnit
     unit1_text = "这是一个关于人工智能的文档。"
