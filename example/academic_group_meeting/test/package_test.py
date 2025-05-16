@@ -1,0 +1,2 @@
+import deepseek_client_langchain
+print(semantic_map.deepseek_client_langchain.__file__)  # 显示实际导入文件的路径

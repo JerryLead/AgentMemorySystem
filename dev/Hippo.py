@@ -552,6 +552,78 @@ class SemanticMap:
 
         logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载。")
         return instance
+    
+    def export_to_milvus(
+        self, 
+        host: str = "localhost", 
+        port: str = "19530",
+        user: str = "", 
+        password: str = "",
+        collection_name: str = "hippo_memory_units"
+    ) -> bool:
+        """
+        将SemanticMap中的内存单元导出到Milvus数据库
+        
+        参数:
+            host: Milvus服务器地址
+            port: Milvus服务器端口
+            user: 用户名（如果需要认证）
+            password: 密码（如果需要认证）
+            collection_name: 集合名称
+        
+        返回:
+            导出是否成功
+        """
+        try:
+            # 延迟导入，避免强制依赖
+            from milvus_operator import MilvusOperator
+        except ImportError:
+            logging.error("未找到milvus_operator模块，请确保已安装pymilvus并创建了milvus_operator.py")
+            return False
+        
+        try:
+            # 创建Milvus操作类
+            milvus_op = MilvusOperator(
+                host=host, 
+                port=port,
+                user=user, 
+                password=password,
+                collection_name=collection_name,
+                embedding_dim=self.embedding_dim
+            )
+            
+            if not milvus_op.is_connected:
+                logging.error("连接Milvus失败，无法导出数据")
+                return False
+            
+            # 创建集合
+            if not milvus_op.create_collection():
+                logging.error("创建Milvus集合失败，无法导出数据")
+                return False
+            
+            # 导出所有内存单元
+            success_count = 0
+            for unit_id, unit in self.memory_units.items():
+                # 查找单元所属的所有空间
+                space_names = []
+                for space_name, space in self.memory_spaces.items():
+                    if unit_id in space.get_memory_unit_ids():
+                        space_names.append(space_name)
+                
+                # 添加到Milvus
+                if milvus_op.add_memory_unit(unit, space_names):
+                    success_count += 1
+                else:
+                    logging.warning(f"导出内存单元 '{unit_id}' 到Milvus失败")
+            
+            logging.info(f"成功导出 {success_count}/{len(self.memory_units)} 个内存单元到Milvus")
+            milvus_op.close()
+            
+            return success_count > 0
+            
+        except Exception as e:
+            logging.error(f"导出到Milvus失败: {e}")
+            return False
 
 
 # --- 语义图谱 ---
@@ -1001,6 +1073,75 @@ class SemanticGraph:
 
         logging.info(f"SemanticGraph 已从目录 '{directory_path}' 加载。")
         return instance
+    
+    def export_to_neo4j(
+        self, 
+        uri: str = "bolt://localhost:7687", 
+        user: str = "neo4j", 
+        password: str = "password",
+        database: str = "neo4j"
+    ) -> bool:
+        """
+        将SemanticGraph中的节点和关系导出到Neo4j数据库
+        
+        参数:
+            uri: Neo4j服务器URI
+            user: 用户名
+            password: 密码
+            database: 数据库名称
+        
+        返回:
+            导出是否成功
+        """
+        try:
+            # 延迟导入，避免强制依赖
+            from neo4j_operator import Neo4jOperator
+        except ImportError:
+            logging.error("未找到neo4j_operator模块，请确保已安装neo4j并创建了neo4j_operator.py")
+            return False
+        
+        try:
+            # 创建Neo4j操作类
+            neo4j_op = Neo4jOperator(
+                uri=uri, 
+                user=user, 
+                password=password,
+                database=database
+            )
+            
+            if not neo4j_op.is_connected:
+                logging.error("连接Neo4j失败，无法导出数据")
+                return False
+            
+            # 导出所有内存单元
+            unit_success_count = 0
+            for unit_id, unit in self.semantic_map.memory_units.items():
+                if neo4j_op.add_memory_unit(unit):
+                    unit_success_count += 1
+                else:
+                    logging.warning(f"导出内存单元 '{unit_id}' 到Neo4j失败")
+            
+            # 导出所有关系
+            rel_success_count = 0
+            for source, target, data in self.nx_graph.edges(data=True):
+                # 获取关系类型，默认为"RELATED_TO"
+                rel_type = data.get("type", "RELATED_TO")
+                # 移除type，因为它已用作关系类型
+                properties = {k: v for k, v in data.items() if k != "type"}
+                
+                if neo4j_op.add_relationship(source, target, rel_type, properties):
+                    rel_success_count += 1
+                else:
+                    logging.warning(f"导出从 '{source}' 到 '{target}' 的 '{rel_type}' 关系到Neo4j失败")
+            
+            logging.info(f"成功导出 {unit_success_count}/{len(self.semantic_map.memory_units)} 个内存单元和 {rel_success_count}/{self.nx_graph.number_of_edges()} 个关系到Neo4j")
+            neo4j_op.close()
+            
+            return unit_success_count > 0 or rel_success_count > 0
+            
+        except Exception as e:
+            logging.error(f"导出到Neo4j失败: {e}")
+        return False
 
     def display_graph_summary(self):
         """打印图谱的摘要信息。"""
@@ -1040,6 +1181,11 @@ if __name__ == "__main__":
 
     # 为简单起见，假设使用默认模型和维度
     semantic_map = SemanticMap(embedding_dim=512)
+    semantic_map = SemanticMap(
+        image_embedding_model_name="/home/zyh/model/clip-ViT-B-32",
+        text_embedding_model_name="/home/zyh/model/clip-ViT-B-32-multilingual-v1",
+        embedding_dim=512
+        )
 
     # 2. 创建和添加 MemoryUnit
     unit1_text = "这是一个关于人工智能的文档。"
@@ -1177,6 +1323,21 @@ if __name__ == "__main__":
     # 9. 显示图谱摘要
     semantic_graph.display_graph_summary()
 
+    # 示例1: 将SemanticMap导出到Milvus
+    semantic_map.export_to_milvus(
+        host="localhost",
+        port="19530",
+        collection_name="my_memory_units"
+    )
+
+    # 示例2: 将SemanticGraph导出到Neo4j
+    semantic_graph.export_to_neo4j(
+        uri="bolt://localhost:7687",
+        user="neo4j",
+        password="20031117",
+        database="academicgraph"
+    )
+
     # 10. 持久化和加载 (示例)
     save_dir = "hippo_save_data"
     logging.info(f"\n--- 保存 SemanticGraph 到 '{save_dir}' ---")
@@ -1207,3 +1368,4 @@ if __name__ == "__main__":
     #     os.remove("dummy_image.jpg")
 
     logging.info("\nHippo.py 示例用法结束。")
+
