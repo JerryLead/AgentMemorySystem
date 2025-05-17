@@ -1,5 +1,6 @@
 # Hippo.py
 
+from datetime import datetime
 import os
 import pickle
 import logging
@@ -20,32 +21,88 @@ logging.basicConfig(
 
 # --- 基础数据结构 ---
 
+# class MemoryUnit:
+#     """
+#     内存单元 (MemoryUnit) 代表系统中的一个基本信息片段。
+#     它包含一个唯一的ID、一个存储具体数据的字典以及一个可选的向量表示。
+#     """
+#     def __init__(self, uid: str, raw_data: Dict[str, Any], embedding: Optional[np.ndarray] = None):
+#         """
+#         初始化一个内存单元。
+#         参数:
+#             uid (str): 内存单元的唯一标识符。
+#             raw_data (Dict[str, Any]): 包含内存单元具体内容的字典。
+#                                      例如: {"text": "一些描述", "image_path": "路径/到/图片.jpg", "type": "文档"}
+#             embedding (Optional[np.ndarray]): 该单元的向量表示。如果为None，则可以由SemanticMap生成。
+#         """
+#         if not isinstance(uid, str) or not uid.strip():
+#             raise TypeError("内存单元ID (uid) 不能为空字符串。")
+#         if not isinstance(raw_data, dict):
+#             raise TypeError("内存单元值 (raw_data) 必须是一个字典。")
+
+#         self.id: str = uid
+#         self.raw_data: Dict[str, Any] = raw_data
+#         self.embedding: Optional[np.ndarray] = embedding
+
+#     def __repr__(self) -> str:
+#         embedding_shape = self.embedding.shape if self.embedding is not None else None
+#         return f"MemoryUnit(id='{self.id}', raw_data={self.raw_data}, embedding_shape={embedding_shape})"
+
 class MemoryUnit:
     """
-    内存单元 (MemoryUnit) 代表系统中的一个基本信息片段。
+    记忆单元 (MemoryUnit) 代表系统中的一个基本信息片段。
     它包含一个唯一的ID、一个存储具体数据的字典以及一个可选的向量表示。
     """
-    def __init__(self, unit_id: str, value: Dict[str, Any], vector: Optional[np.ndarray] = None):
-        """
-        初始化一个内存单元。
-        参数:
-            unit_id (str): 内存单元的唯一标识符。
-            value (Dict[str, Any]): 包含内存单元具体内容的字典。
-                                     例如: {"text": "一些描述", "image_path": "路径/到/图片.jpg", "type": "文档"}
-            vector (Optional[np.ndarray]): 该单元的向量表示。如果为None，则可以由SemanticMap生成。
-        """
-        if not isinstance(unit_id, str) or not unit_id.strip():
-            raise ValueError("内存单元ID (unit_id) 不能为空字符串。")
-        if not isinstance(value, dict):
-            raise ValueError("内存单元值 (value) 必须是一个字典。")
 
-        self.id: str = unit_id
-        self.value: Dict[str, Any] = value
-        self.vector: Optional[np.ndarray] = vector
+    def __init__(
+        self,
+        uid: str,
+        raw_data: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        embedding: Optional[np.ndarray] = None,
+    ):
+        """
+        初始化一个记忆单元。
+        参数:
+            unit_id (str): 记忆单元的唯一标识符。
+            value (Dict[str, Any]): 包含记忆单元具体内容的字典。例如: {"text": "一些描述", "image_path": "路径/到/图片.jpg", "type": "文档"}
+            embedding (Optional[np.ndarray]): 该单元的向量表示。如果为None，则可以由SemanticMap生成。
+        """
+        if not isinstance(uid, str) or not uid.strip():
+            raise ValueError("记忆单元UID不能为空")
+        if not isinstance(raw_data, dict):
+            raise ValueError("记忆单元Raw Data必须是一个字典")
+        # 修改逻辑，允许metadata为None
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError(f"记忆单元Metadata必须是一个字典")
+
+        self.uid: str = uid
+        self.raw_data: Dict[str, Any] = raw_data
+        self.metadata = metadata or {
+            "created": str(datetime.now()),
+            "updated": str(datetime.now()),
+        }
+        self.embedding: Optional[np.ndarray] = embedding
+
+    def __str__(self) -> str:
+        embedding_shape = self.embedding.shape if self.embedding is not None else None
+        return f"MemoryUnit(uid='{self.uid}', raw_data={self.raw_data}, metadata={self.metadata}, embedding_shape={embedding_shape})"
 
     def __repr__(self) -> str:
-        vector_shape = self.vector.shape if self.vector is not None else None
-        return f"MemoryUnit(id='{self.id}', value={self.value}, vector_shape={vector_shape})"
+        return f"MemoryUnit({self.uid})"
+
+    def __eq__(self, value):
+        if not isinstance(value, MemoryUnit):
+            return False
+        return (
+            self.uid == value.uid
+            and self.raw_data == value.raw_data
+            and self.metadata == value.metadata
+            # and np.array_equal(self.embedding,value.embedding)
+        )
+
+    def __hash__(self):
+        return hash(self.uid)
 
 class MemorySpace:
     """
@@ -59,32 +116,49 @@ class MemorySpace:
             name (str): 内存空间的名称，应唯一。
         """
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("内存空间名称 (name) 不能为空字符串。")
+            raise TypeError("内存空间名称 (name) 不能为空字符串。")
         self.name: str = name
-        self.memory_unit_ids: Set[str] = set() # 存储属于此空间的 MemoryUnit 的 ID
+        self.memory_uids: Set[str] = set() # 存储属于此空间的 MemoryUnit 的 ID
 
-    def add_memory_unit(self, unit_id: str):
+    def add_unit(self, uid: str):
         """向此内存空间添加一个内存单元的ID。"""
-        if not isinstance(unit_id, str) or not unit_id.strip():
+        if not isinstance(uid, str) or not uid.strip():
             logging.warning(f"尝试向内存空间 '{self.name}' 添加无效的单元ID。")
             return
-        self.memory_unit_ids.add(unit_id)
-        logging.debug(f"内存单元 '{unit_id}' 已添加到内存空间 '{self.name}'。")
+        self.memory_uids.add(uid)
+        logging.debug(f"内存单元 '{uid}' 已添加到内存空间 '{self.name}'。")
 
-    def remove_memory_unit(self, unit_id: str):
+    def remove_unit(self, uid: str):
         """从此内存空间移除一个内存单元的ID。"""
-        if unit_id in self.memory_unit_ids:
-            self.memory_unit_ids.remove(unit_id)
-            logging.debug(f"内存单元 '{unit_id}' 已从内存空间 '{self.name}' 移除。")
+        if uid in self.memory_uids:
+            self.memory_uids.remove(uid)
+            logging.debug(f"内存单元 '{uid}' 已从内存空间 '{self.name}' 移除。")
         else:
-            logging.warning(f"尝试从内存空间 '{self.name}' 移除不存在的内存单元ID '{unit_id}'。")
+            logging.warning(f"尝试从内存空间 '{self.name}' 移除不存在的内存单元ID '{uid}'。")
 
-    def get_memory_unit_ids(self) -> Set[str]:
+    def add_units(self, uids: List[str]):
+        """向此内存空间添加多个内存单元的ID。"""
+        for uid in uids:
+            if not isinstance(uid, str) or not uid.strip():
+                logging.warning(f"尝试向内存空间 '{self.name}' 添加无效的单元ID '{uid}'。")
+                continue
+            self.add_unit(uid)
+            logging.debug(f"内存单元 '{uid}' 已添加到内存空间 '{self.name}'。")
+
+    def remove_units(self, uids: List[str]):
+        """从此内存空间移除多个内存单元的ID。"""
+        for uid in uids:
+            if uid in self.memory_uids:
+                self.remove_unit(uid)
+            else:
+                logging.warning(f"尝试从内存空间 '{self.name}' 移除不存在的内存单元ID '{uid}'。")
+
+    def get_memory_uids(self) -> Set[str]:
         """获取此内存空间中所有内存单元的ID集合。"""
-        return self.memory_unit_ids
+        return self.memory_uids
 
     def __repr__(self) -> str:
-        return f"MemorySpace(name='{self.name}', unit_count={len(self.memory_unit_ids)})"
+        return f"MemorySpace(name='{self.name}', unit_count={len(self.memory_uids)})"
 
 # --- 语义地图 ---
 
@@ -94,8 +168,8 @@ class SemanticMap:
     它还管理内存空间，允许在特定上下文中进行操作。
     类似于一个向量数据库。
     """
-    DEFAULT_TEXT_EMBEDDING_KEY = "text_content" # MemoryUnit.value 中用于文本嵌入的默认键
-    DEFAULT_IMAGE_EMBEDDING_KEY = "image_path" # MemoryUnit.value 中用于图像嵌入的默认键
+    DEFAULT_TEXT_EMBEDDING_KEY = "text_content" # MemoryUnit.raw_data 中用于文本嵌入的默认键
+    DEFAULT_IMAGE_EMBEDDING_KEY = "image_path" # MemoryUnit.raw_data 中用于图像嵌入的默认键
 
     def __init__(self,
                  image_embedding_model_name: str = "clip-ViT-B-32",
@@ -114,7 +188,7 @@ class SemanticMap:
         self.embedding_dim: int = embedding_dim
         self.faiss_index_type: str = faiss_index_type
         
-        self.memory_units: Dict[str, MemoryUnit] = {} # 存储 MemoryUnit 对象，键为 unit_id
+        self.memory_units: Dict[str, MemoryUnit] = {} # 存储 MemoryUnit 对象，键为 uid
         self.memory_spaces: Dict[str, MemorySpace] = {} # 存储 MemorySpace 对象，键为 space_name
 
         self.faiss_index: Optional[faiss.Index] = None # FAISS 索引
@@ -124,7 +198,7 @@ class SemanticMap:
         # 当使用 IndexIDMap 时，我们传递给 add_with_ids 的 ID 可以是我们自己的整数ID。
         # 我们将使用一个内部计数器或 MemoryUnit ID 的哈希（如果需要稳定且非连续的ID）
         # 为简单起见，我们将维护一个从 MemoryUnit.id 到一个内部 faiss_id (int64) 的映射。
-        self._unit_id_to_internal_faiss_id: Dict[str, int] = {}
+        self._uid_to_internal_faiss_id: Dict[str, int] = {}
         self._internal_faiss_id_counter: int = 0 # 用于生成唯一的内部 FAISS ID
 
         try:
@@ -145,7 +219,7 @@ class SemanticMap:
         """初始化或重新初始化 FAISS 索引。"""
         try:
             # IndexIDMap2 允许我们使用自己的64位整数ID
-            # 我们将使用一个内部计数器生成的ID，并维护 unit_id -> internal_faiss_id 的映射
+            # 我们将使用一个内部计数器生成的ID，并维护 uid -> internal_faiss_id 的映射
             base_index = faiss.index_factory(self.embedding_dim, self.faiss_index_type.replace("IDMap,","").replace("IDMap2,","")) # 例如 "Flat" or "HNSW32,Flat"
             if "IDMap" not in self.faiss_index_type and "IDMap2" not in self.faiss_index_type:
                  logging.warning(f"FAISS索引类型 '{self.faiss_index_type}' 不包含 'IDMap' 或 'IDMap2'。建议使用它们以支持按ID删除和高效过滤。将尝试包装基础索引。")
@@ -214,30 +288,30 @@ class SemanticMap:
             elif content_type == "image_path":
                 embedding = self._get_image_embedding(str(explicit_content))
             else:
-                logging.warning(f"不支持的内容类型 '{content_type}' 用于为单元 '{unit.id}' 生成嵌入。")
-        else: # 尝试从 unit.value 推断
-            image_path = unit.value.get(self.DEFAULT_IMAGE_EMBEDDING_KEY)
-            text_content = unit.value.get(self.DEFAULT_TEXT_EMBEDDING_KEY)
+                logging.warning(f"不支持的内容类型 '{content_type}' 用于为单元 '{unit.uid}' 生成嵌入。")
+        else: # 尝试从 unit.raw_data 推断
+            image_path = unit.raw_data.get(self.DEFAULT_IMAGE_EMBEDDING_KEY)
+            text_content = unit.raw_data.get(self.DEFAULT_TEXT_EMBEDDING_KEY)
 
             if image_path and isinstance(image_path, str):
                 embedding = self._get_image_embedding(image_path)
                 if embedding is not None:
-                    logging.debug(f"已为单元 '{unit.id}' 从其值中的图像路径 '{image_path}' 生成嵌入。")
+                    logging.debug(f"已为单元 '{unit.uid}' 从其值中的图像路径 '{image_path}' 生成嵌入。")
             
             if embedding is None and text_content and isinstance(text_content, str): # 如果图像嵌入失败或未提供图像，则尝试文本
                 embedding = self._get_text_embedding(text_content)
                 if embedding is not None:
-                    logging.debug(f"已为单元 '{unit.id}' 从其值中的文本内容生成嵌入。")
+                    logging.debug(f"已为单元 '{unit.uid}' 从其值中的文本内容生成嵌入。")
             
             if embedding is None:
-                logging.warning(f"无法从单元 '{unit.id}' 的值中找到合适的内容来生成嵌入。请检查键 '{self.DEFAULT_IMAGE_EMBEDDING_KEY}' 或 '{self.DEFAULT_TEXT_EMBEDDING_KEY}'。")
+                logging.warning(f"无法从单元 '{unit.uid}' 的值中找到合适的内容来生成嵌入。请检查键 '{self.DEFAULT_IMAGE_EMBEDDING_KEY}' 或 '{self.DEFAULT_TEXT_EMBEDDING_KEY}'。")
         
         if embedding is not None and embedding.shape[0] != self.embedding_dim:
-            logging.error(f"为单元 '{unit.id}' 生成的嵌入维度 ({embedding.shape[0]}) 与期望维度 ({self.embedding_dim}) 不符。")
+            logging.error(f"为单元 '{unit.uid}' 生成的嵌入维度 ({embedding.shape[0]}) 与期望维度 ({self.embedding_dim}) 不符。")
             return None
         return embedding
 
-    def add_memory_unit(self,
+    def add_unit(self,
                         unit: MemoryUnit,
                         explicit_content_for_embedding: Optional[Any] = None,
                         content_type_for_embedding: Optional[str] = None, # "text" or "image_path"
@@ -248,7 +322,7 @@ class SemanticMap:
         如果单元已存在，则其值和嵌入将被更新。
         参数:
             unit (MemoryUnit): 要添加或更新的内存单元对象。
-            explicit_content_for_embedding (Optional[Any]): 用于生成嵌入的显式内容。如果提供，将覆盖从 unit.value 推断的内容。
+            explicit_content_for_embedding (Optional[Any]): 用于生成嵌入的显式内容。如果提供，将覆盖从 unit.raw_data 推断的内容。
             content_type_for_embedding (Optional[str]): explicit_content_for_embedding 的类型 ("text" 或 "image_path")。
             space_names (Optional[List[str]]): 要将此单元添加到的内存空间的名称列表。如果空间不存在，将创建它们。
             rebuild_index_immediately (bool): 是否在添加后立即重建FAISS索引。对于批量添加，建议设置为False，并在最后统一重建。
@@ -261,56 +335,56 @@ class SemanticMap:
         new_embedding = self._generate_embedding_for_unit(unit, explicit_content_for_embedding, content_type_for_embedding)
         
         if new_embedding is None:
-            logging.warning(f"未能为内存单元 '{unit.id}' 生成嵌入。该单元将被添加，但无法用于相似性搜索，除非后续更新嵌入并重建索引。")
-        unit.vector = new_embedding # 更新单元对象中的向量
+            logging.warning(f"未能为内存单元 '{unit.uid}' 生成嵌入。该单元将被添加，但无法用于相似性搜索，除非后续更新嵌入并重建索引。")
+        unit.embedding = new_embedding # 更新单元对象中的向量
 
         # 如果单元已存在，可能需要从FAISS中移除旧向量 (如果向量已更改)
         # 为了简单起见，如果 rebuild_index_immediately 为 True，或者依赖于后续的 build_index() 调用来处理更新。
         # 更精细的更新会在这里处理 self.faiss_index.remove_ids()。
 
-        self.memory_units[unit.id] = unit
-        logging.info(f"内存单元 '{unit.id}' 已添加/更新到 SemanticMap。")
+        self.memory_units[unit.uid] = unit
+        logging.info(f"内存单元 '{unit.uid}' 已添加/更新到 SemanticMap。")
 
         if space_names:
             for space_name in space_names:
-                self.add_unit_to_space(unit.id, space_name)
+                self.add_unit_to_space(unit.uid, space_name)
         
         if rebuild_index_immediately:
             self.build_index() # 立即重建索引 (可能效率不高，除非是单个添加)
 
-    def get_memory_unit(self, unit_id: str) -> Optional[MemoryUnit]:
+    def get_unit(self, uid: str) -> Optional[MemoryUnit]:
         """通过ID检索内存单元。"""
-        return self.memory_units.get(unit_id)
+        return self.memory_units.get(uid)
 
-    def delete_memory_unit(self, unit_id: str, rebuild_index_immediately: bool = False):
+    def delete_unit(self, uid: str, rebuild_index_immediately: bool = False):
         """从语义地图中删除一个内存单元。"""
-        if unit_id in self.memory_units:
-            del self.memory_units[unit_id]
+        if uid in self.memory_units:
+            del self.memory_units[uid]
             
             # 从所有内存空间中移除
-            for space in self.memory_spaces.values():
-                space.remove_memory_unit(unit_id)
+            for space in self.memory_spaces:
+                space.remove_unit(uid)
             
             # 从FAISS索引中移除 (如果已构建且包含该单元)
-            if self.faiss_index and unit_id in self._unit_id_to_internal_faiss_id:
-                internal_id_to_remove = self._unit_id_to_internal_faiss_id[unit_id]
+            if self.faiss_index and uid in self._uid_to_internal_faiss_id:
+                internal_id_to_remove = self._uid_to_internal_faiss_id[uid]
                 try:
                     # FAISS 的 remove_ids 需要一个包含ID的numpy数组
                     self.faiss_index.remove_ids(np.array([internal_id_to_remove], dtype=np.int64))
-                    logging.info(f"内存单元 '{unit_id}' (内部FAISS ID: {internal_id_to_remove}) 已从FAISS索引中移除。")
-                    del self._unit_id_to_internal_faiss_id[unit_id]
+                    logging.info(f"内存单元 '{uid}' (内部FAISS ID: {internal_id_to_remove}) 已从FAISS索引中移除。")
+                    del self._uid_to_internal_faiss_id[uid]
                     # 注意：简单的 remove_ids 可能会导致ID空间不连续，这对于某些FAISS索引类型可能是个问题。
                     # IndexIDMap 通常能处理这个问题。
                 except Exception as e:
-                    logging.error(f"从FAISS索引中移除单元 '{unit_id}' 失败: {e}。建议重建索引。")
+                    logging.error(f"从FAISS索引中移除单元 '{uid}' 失败: {e}。建议重建索引。")
             else:
-                logging.warning(f"单元 '{unit_id}' 不在FAISS ID映射中，可能未被索引或已被移除。")
+                logging.warning(f"单元 '{uid}' 不在FAISS ID映射中，可能未被索引或已被移除。")
 
-            logging.info(f"内存单元 '{unit_id}' 已从 SemanticMap 删除。")
+            logging.info(f"内存单元 '{uid}' 已从 SemanticMap 删除。")
             if rebuild_index_immediately:
                 self.build_index()
         else:
-            logging.warning(f"尝试删除不存在的内存单元ID '{unit_id}'。")
+            logging.warning(f"尝试删除不存在的内存单元ID '{uid}'。")
 
     def build_index(self):
         """
@@ -319,7 +393,7 @@ class SemanticMap:
         if not self.memory_units:
             logging.info("没有内存单元可用于构建索引。")
             if self.faiss_index: self.faiss_index.reset() # 清空现有索引
-            self._unit_id_to_internal_faiss_id.clear()
+            self._uid_to_internal_faiss_id.clear()
             self._internal_faiss_id_counter = 0
             return
 
@@ -327,20 +401,20 @@ class SemanticMap:
         internal_faiss_ids_for_index: List[int] = []
         
         # 重置映射和计数器，因为我们要重建
-        self._unit_id_to_internal_faiss_id.clear()
+        self._uid_to_internal_faiss_id.clear()
         # self._internal_faiss_id_counter = 0 # 如果希望ID在多次重建中保持某种程度的稳定性，则不要重置计数器，除非ID用完。
                                           # 但对于 IndexIDMap，每次重建时使用新的连续ID可能更简单。
 
         current_internal_id = 0
-        for unit_id, unit in self.memory_units.items():
-            if unit.vector is not None and unit.vector.shape[0] == self.embedding_dim:
-                valid_embeddings.append(unit.vector)
+        for uid, unit in self.memory_units.items():
+            if unit.embedding is not None and unit.embedding.shape[0] == self.embedding_dim:
+                valid_embeddings.append(unit.embedding)
                 # 分配一个新的内部FAISS ID
-                self._unit_id_to_internal_faiss_id[unit_id] = current_internal_id
+                self._uid_to_internal_faiss_id[uid] = current_internal_id
                 internal_faiss_ids_for_index.append(current_internal_id)
                 current_internal_id += 1
             else:
-                logging.debug(f"内存单元 '{unit_id}' 没有有效向量，将不被包含在FAISS索引中。")
+                logging.debug(f"内存单元 '{uid}' 没有有效向量，将不被包含在FAISS索引中。")
 
         if not valid_embeddings:
             logging.info("没有有效的嵌入可用于构建FAISS索引。")
@@ -376,19 +450,19 @@ class SemanticMap:
         self._internal_faiss_id_counter = current_internal_id
 
 
-    def search_similarity_by_vector(self,
-                                query_vector: np.ndarray,
+    def search_similarity_by_embedding(self,
+                                query_embedding: np.ndarray,
                                 k: int = 5,
                                 space_name: Optional[str] = None,
-                                filter_unit_ids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
+                                filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """
         通过查询向量在语义地图中搜索相似的内存单元。
         参数:
-            query_vector (np.ndarray): 用于查询的嵌入向量。
+            query_embedding (np.ndarray): 用于查询的嵌入向量。
             k (int): 要返回的最相似单元的数量。
             space_name (Optional[str]): 如果提供，则仅在指定的内存空间内搜索。
-            filter_unit_ids (Optional[Set[str]]): 一个可选的单元ID集合，用于进一步限制搜索范围（仅搜索这些ID对应的单元）。
-                                                如果同时提供了 space_name 和 filter_unit_ids，则取它们的交集。
+            filter_uids (Optional[Set[str]]): 一个可选的单元ID集合，用于进一步限制搜索范围（仅搜索这些ID对应的单元）。
+                                                如果同时提供了 space_name 和 filter_uids，则取它们的交集。
         返回:
             List[Tuple[MemoryUnit, float]]: 一个元组列表，每个元组包含 (相似的MemoryUnit, 相似度得分/距离)。
                                             列表按相似度降序排列 (距离越小越相似)。
@@ -396,41 +470,41 @@ class SemanticMap:
         if self.faiss_index is None or self.faiss_index.ntotal == 0:
             logging.warning("FAISS索引未构建或为空。无法执行搜索。")
             return []
-        if query_vector is None or query_vector.shape[0] != self.embedding_dim:
+        if query_embedding is None or query_embedding.shape[0] != self.embedding_dim:
             logging.error(f"查询向量无效或维度不匹配 (期望 {self.embedding_dim})。")
             return []
 
-        query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
+        query_embedding_np = query_embedding.reshape(1, -1).astype(np.float32)
         
         search_params = None
         final_target_internal_ids_np = None
 
         # 确定搜索范围 (所有单元，特定空间内的单元，或特定ID列表中的单元)
-        candidate_unit_ids: Optional[Set[str]] = None
+        candidate_uids: Optional[Set[str]] = None
         if space_name:
             space = self.get_memory_space(space_name)
             if space:
-                candidate_unit_ids = space.get_memory_unit_ids().copy() # 获取副本
+                candidate_uids = space.get_memory_uids().copy() # 获取副本
             else:
-                logging.warning(f"内存空间 '{space_name}' 未找到。将执行全局搜索或基于 filter_unit_ids 的搜索。")
-                # 如果空间不存在，则不应返回任何结果，除非filter_unit_ids也为空
-                if not filter_unit_ids: return []
+                logging.warning(f"内存空间 '{space_name}' 未找到。将执行全局搜索或基于 filter_uids 的搜索。")
+                # 如果空间不存在，则不应返回任何结果，除非filter_uids也为空
+                if not filter_uids: return []
 
 
-        if filter_unit_ids:
-            if candidate_unit_ids is not None:
-                candidate_unit_ids.intersection_update(filter_unit_ids) # 取交集
+        if filter_uids:
+            if candidate_uids is not None:
+                candidate_uids.intersection_update(filter_uids) # 取交集
             else:
-                candidate_unit_ids = filter_unit_ids.copy()
+                candidate_uids = filter_uids.copy()
         
-        if candidate_unit_ids is not None: # 如果有任何过滤条件
-            if not candidate_unit_ids: # 如果过滤后候选集为空
+        if candidate_uids is not None: # 如果有任何过滤条件
+            if not candidate_uids: # 如果过滤后候选集为空
                 logging.info("根据空间和/或ID过滤器，没有候选内存单元可供搜索。")
                 return []
             
             # 将候选的 MemoryUnit ID 转换为内部 FAISS ID
-            target_internal_faiss_ids = [self._unit_id_to_internal_faiss_id[uid] 
-                                        for uid in candidate_unit_ids if uid in self._unit_id_to_internal_faiss_id]
+            target_internal_faiss_ids = [self._uid_to_internal_faiss_id[uid] 
+                                        for uid in candidate_uids if uid in self._uid_to_internal_faiss_id]
             if not target_internal_faiss_ids:
                 logging.info("候选单元ID在FAISS索引中没有对应的内部ID。")
                 return []
@@ -447,53 +521,53 @@ class SemanticMap:
 
         try:
             # 尝试使用搜索参数
-            distances, internal_faiss_indices = self.faiss_index.search(query_vector_np, k, params=search_params)
+            distances, internal_faiss_indices = self.faiss_index.search(query_embedding_np, k, params=search_params)
         except RuntimeError as e:
             if "search params not supported for this index" in str(e):
                 # 索引不支持搜索参数，使用不带参数的搜索
                 logging.warning(f"当前FAISS索引类型 '{self.faiss_index_type}' 不支持搜索参数。执行不带过滤器的搜索。")
-                if space_name or filter_unit_ids:
+                if space_name or filter_uids:
                     logging.warning("空间和ID过滤将在搜索后手动应用。")
-                distances, internal_faiss_indices = self.faiss_index.search(query_vector_np, k)
+                distances, internal_faiss_indices = self.faiss_index.search(query_embedding_np, k)
             else:
                 # 如果是其他类型的错误，则重新抛出
                 raise
         
         results: List[Tuple[MemoryUnit, float]] = []
         # 反向映射：从内部FAISS ID找到MemoryUnit ID
-        # 创建一个从 internal_faiss_id 到 unit_id 的临时反向映射
-        internal_id_to_unit_id_map = {v: k for k, v in self._unit_id_to_internal_faiss_id.items()}
+        # 创建一个从 internal_faiss_id 到 uid 的临时反向映射
+        internal_id_to_uid_map = {v: k for k, v in self._uid_to_internal_faiss_id.items()}
 
         for i in range(internal_faiss_indices.shape[1]):
             internal_id = internal_faiss_indices[0, i]
             if internal_id == -1: # FAISS中表示没有更多结果
                 continue
             
-            unit_id = internal_id_to_unit_id_map.get(internal_id)
-            if unit_id:
-                unit = self.get_memory_unit(unit_id)
+            uid = internal_id_to_uid_map.get(internal_id)
+            if uid:
+                unit = self.get_unit(uid)
                 if unit:
                     results.append((unit, float(distances[0, i])))
                 else: # 理论上不应发生，因为internal_id应该有效
-                    logging.warning(f"在FAISS搜索结果中找到内部ID {internal_id}，但在内存单元字典中找不到对应的单元ID '{unit_id}'。")
+                    logging.warning(f"在FAISS搜索结果中找到内部ID {internal_id}，但在内存单元字典中找不到对应的单元ID '{uid}'。")
             else:
                 logging.warning(f"在FAISS搜索结果中找到无法映射回单元ID的内部ID {internal_id}。")
         
         return results
 
-    def search_similarity_by_text(self, query_text: str, k: int = 5, space_name: Optional[str] = None, filter_unit_ids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
+    def search_similarity_by_text(self, query_text: str, k: int = 5, space_name: Optional[str] = None, filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """通过查询文本进行相似性搜索。"""
-        query_vector = self._get_text_embedding(query_text)
-        if query_vector is None:
+        query_embedding = self._get_text_embedding(query_text)
+        if query_embedding is None:
             return []
-        return self.search_similarity_by_vector(query_vector, k, space_name, filter_unit_ids)
+        return self.search_similarity_by_embedding(query_embedding, k, space_name, filter_uids)
 
-    def search_similarity_by_image(self, image_path: str, k: int = 5, space_name: Optional[str] = None, filter_unit_ids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
+    def search_similarity_by_image(self, image_path: str, k: int = 5, space_name: Optional[str] = None, filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """通过查询图像路径进行相似性搜索。"""
-        query_vector = self._get_image_embedding(image_path)
-        if query_vector is None:
+        query_embedding = self._get_image_embedding(image_path)
+        if query_embedding is None:
             return []
-        return self.search_similarity_by_vector(query_vector, k, space_name, filter_unit_ids)
+        return self.search_similarity_by_embedding(query_embedding, k, space_name, filter_uids)
 
     # --- MemorySpace 管理方法 ---
     def create_memory_space(self, space_name: str) -> MemorySpace:
@@ -507,27 +581,27 @@ class SemanticMap:
         """通过名称获取内存空间。"""
         return self.memory_spaces.get(space_name)
 
-    def add_unit_to_space(self, unit_id: str, space_name: str):
+    def add_unit_to_space(self, uid: str, space_name: str):
         """将一个内存单元添加到一个内存空间。"""
-        if unit_id not in self.memory_units:
-            logging.warning(f"尝试将不存在的内存单元 '{unit_id}' 添加到空间 '{space_name}'。")
+        if uid not in self.memory_units:
+            logging.warning(f"尝试将不存在的内存单元 '{uid}' 添加到空间 '{space_name}'。")
             return
         space = self.create_memory_space(space_name) # 如果空间不存在则创建
-        space.add_memory_unit(unit_id)
+        space.add_unit(uid)
 
-    def remove_unit_from_space(self, unit_id: str, space_name: str):
+    def remove_unit_from_space(self, uid: str, space_name: str):
         """从一个内存空间移除一个内存单元。"""
         space = self.get_memory_space(space_name)
         if space:
-            space.remove_memory_unit(unit_id)
+            space.remove_unit(uid)
         else:
-            logging.warning(f"尝试从不存在的内存空间 '{space_name}' 移除单元 '{unit_id}'。")
+            logging.warning(f"尝试从不存在的内存空间 '{space_name}' 移除单元 '{uid}'。")
 
     # --- 持久化 ---
     def save_map(self, directory_path: str):
         """
         将 SemanticMap 的状态保存到指定目录。
-        会保存 memory_units, memory_spaces, FAISS 索引, 以及 _unit_id_to_internal_faiss_id 映射。
+        会保存 memory_units, memory_spaces, FAISS 索引, 以及 _uid_to_internal_faiss_id 映射。
         参数:
             directory_path (str): 用于保存文件的目录路径。如果不存在，将尝试创建。
         """
@@ -538,7 +612,7 @@ class SemanticMap:
             pickle.dump({
                 "memory_units": self.memory_units,
                 "memory_spaces": self.memory_spaces,
-                "_unit_id_to_internal_faiss_id": self._unit_id_to_internal_faiss_id,
+                "_uid_to_internal_faiss_id": self._uid_to_internal_faiss_id,
                 "_internal_faiss_id_counter": self._internal_faiss_id_counter,
                 "embedding_dim": self.embedding_dim,
                 "faiss_index_type": self.faiss_index_type
@@ -593,7 +667,7 @@ class SemanticMap:
         
         instance.memory_units = saved_state["memory_units"]
         instance.memory_spaces = saved_state["memory_spaces"]
-        instance._unit_id_to_internal_faiss_id = saved_state.get("_unit_id_to_internal_faiss_id", {})
+        instance._uid_to_internal_faiss_id = saved_state.get("_uid_to_internal_faiss_id", {})
         instance._internal_faiss_id_counter = saved_state.get("_internal_faiss_id_counter", 0)
 
         if os.path.exists(index_file):
@@ -664,18 +738,18 @@ class SemanticMap:
             
             # 导出所有内存单元
             success_count = 0
-            for unit_id, unit in self.memory_units.items():
+            for uid, unit in self.memory_units.items():
                 # 查找单元所属的所有空间
                 space_names = []
                 for space_name, space in self.memory_spaces.items():
-                    if unit_id in space.get_memory_unit_ids():
+                    if uid in space.get_memory_uids():
                         space_names.append(space_name)
                 
                 # 添加到Milvus
-                if milvus_op.add_memory_unit(unit, space_names):
+                if milvus_op.add_unit(unit, space_names):
                     success_count += 1
                 else:
-                    logging.warning(f"导出内存单元 '{unit_id}' 到Milvus失败")
+                    logging.warning(f"导出内存单元 '{uid}' 到Milvus失败")
             
             logging.info(f"成功导出 {success_count}/{len(self.memory_units)} 个内存单元到Milvus")
             milvus_op.close()
@@ -705,7 +779,7 @@ class SemanticGraph:
         self.nx_graph: nx.DiGraph = nx.DiGraph() # 使用 NetworkX有向图存储节点和显式关系
         logging.info("SemanticGraph 已初始化。")
 
-    def add_memory_unit(self,
+    def add_unit(self,
                         unit: MemoryUnit,
                         explicit_content_for_embedding: Optional[Any] = None,
                         content_type_for_embedding: Optional[str] = None,
@@ -721,7 +795,7 @@ class SemanticGraph:
             rebuild_semantic_map_index_immediately (bool): 是否在添加后立即重建 SemanticMap 的 FAISS 索引。
         """
         # 1. 将单元添加到 SemanticMap
-        self.semantic_map.add_memory_unit(
+        self.semantic_map.add_unit(
             unit,
             explicit_content_for_embedding,
             content_type_for_embedding,
@@ -730,94 +804,94 @@ class SemanticGraph:
         )
         
         # 2. 将单元ID作为节点添加到 NetworkX 图中 (如果尚不存在)
-        if not self.nx_graph.has_node(unit.id):
-            # 可以在节点上存储来自 unit.value 的一些属性，如果需要的话
-            self.nx_graph.add_node(unit.id, **unit.value) 
-            logging.debug(f"节点 '{unit.id}' 已添加到 NetworkX 图。")
+        if not self.nx_graph.has_node(unit.uid):
+            # 可以在节点上存储来自 unit.raw_data 的一些属性，如果需要的话
+            self.nx_graph.add_node(unit.uid, **unit.raw_data) 
+            logging.debug(f"节点 '{unit.uid}' 已添加到 NetworkX 图。")
         else: # 如果节点已存在，可以选择更新其属性
-            nx.set_node_attributes(self.nx_graph, {unit.id: unit.value})
-            logging.debug(f"节点 '{unit.id}' 的属性已在 NetworkX 图中更新。")
+            nx.set_node_attributes(self.nx_graph, {unit.uid: unit.raw_data})
+            logging.debug(f"节点 '{unit.uid}' 的属性已在 NetworkX 图中更新。")
 
 
     def add_relationship(self,
-                         source_unit_id: str,
-                         target_unit_id: str,
+                         source_uid: str,
+                         target_uid: str,
                          relationship_name: str,
                          bidirectional: bool = False,
                          **kwargs: Any): # 允许添加其他关系属性
         """
         在两个已存在的内存单元 (节点) 之间添加一条显式关系 (边)。
         参数:
-            source_unit_id (str): 源节点的ID。
-            target_unit_id (str): 目标节点的ID。
+            source_uid (str): 源节点的ID。
+            target_uid (str): 目标节点的ID。
             relationship_name (str): 关系的名称 (例如 "连接到", "依赖于", "父子")。
             bidirectional (bool): 如果为 True，则添加一条从 target 到 source 的具有相同名称的反向关系。
             **kwargs: 任何其他要存储为边属性的键值对。
         """
-        if not self.semantic_map.get_memory_unit(source_unit_id):
-            logging.error(f"源节点 '{source_unit_id}' 不存在于 SemanticMap 中。无法添加关系。")
+        if not self.semantic_map.get_unit(source_uid):
+            logging.error(f"源节点 '{source_uid}' 不存在于 SemanticMap 中。无法添加关系。")
             return
-        if not self.semantic_map.get_memory_unit(target_unit_id):
-            logging.error(f"目标节点 '{target_unit_id}' 不存在于 SemanticMap 中。无法添加关系。")
+        if not self.semantic_map.get_unit(target_uid):
+            logging.error(f"目标节点 '{target_uid}' 不存在于 SemanticMap 中。无法添加关系。")
             return
         
-        # 确保节点也存在于nx_graph中 (通常 add_memory_unit 会处理)
-        if not self.nx_graph.has_node(source_unit_id): self.nx_graph.add_node(source_unit_id)
-        if not self.nx_graph.has_node(target_unit_id): self.nx_graph.add_node(target_unit_id)
+        # 确保节点也存在于nx_graph中 (通常 add_unit 会处理)
+        if not self.nx_graph.has_node(source_uid): self.nx_graph.add_node(source_uid)
+        if not self.nx_graph.has_node(target_uid): self.nx_graph.add_node(target_uid)
 
         # 使用 relationship_name 作为边的 'type' 或 'label' 属性
         edge_attributes = {"type": relationship_name, **kwargs}
-        self.nx_graph.add_edge(source_unit_id, target_unit_id, **edge_attributes)
-        logging.info(f"已添加从 '{source_unit_id}' 到 '{target_unit_id}' 的关系 '{relationship_name}'。")
+        self.nx_graph.add_edge(source_uid, target_uid, **edge_attributes)
+        logging.info(f"已添加从 '{source_uid}' 到 '{target_uid}' 的关系 '{relationship_name}'。")
 
         if bidirectional:
-            self.nx_graph.add_edge(target_unit_id, source_unit_id, **edge_attributes) # 注意：如果关系有方向性，反向关系可能需要不同名称/属性
-            logging.info(f"已添加从 '{target_unit_id}' 到 '{source_unit_id}' 的双向关系 '{relationship_name}'。")
+            self.nx_graph.add_edge(target_uid, source_uid, **edge_attributes) # 注意：如果关系有方向性，反向关系可能需要不同名称/属性
+            logging.info(f"已添加从 '{target_uid}' 到 '{source_uid}' 的双向关系 '{relationship_name}'。")
 
-    def delete_memory_unit(self, unit_id: str, rebuild_semantic_map_index_immediately: bool = False):
+    def delete_unit(self, uid: str, rebuild_semantic_map_index_immediately: bool = False):
         """从图谱和底层的 SemanticMap 中删除一个内存单元及其所有相关关系。"""
         # 1. 从 SemanticMap 删除
-        self.semantic_map.delete_memory_unit(unit_id, rebuild_index_immediately=rebuild_semantic_map_index_immediately)
+        self.semantic_map.delete_unit(uid, rebuild_index_immediately=rebuild_semantic_map_index_immediately)
         
         # 2. 从 NetworkX 图中删除节点 (这会自动删除所有相关的边)
-        if self.nx_graph.has_node(unit_id):
-            self.nx_graph.remove_node(unit_id)
-            logging.info(f"节点 '{unit_id}' 及其关系已从 NetworkX 图中删除。")
+        if self.nx_graph.has_node(uid):
+            self.nx_graph.remove_node(uid)
+            logging.info(f"节点 '{uid}' 及其关系已从 NetworkX 图中删除。")
         else:
-            logging.warning(f"尝试从 NetworkX 图中删除不存在的节点 '{unit_id}'。")
+            logging.warning(f"尝试从 NetworkX 图中删除不存在的节点 '{uid}'。")
 
-    def delete_relationship(self, source_unit_id: str, target_unit_id: str, relationship_name: Optional[str] = None):
+    def delete_relationship(self, source_uid: str, target_uid: str, relationship_name: Optional[str] = None):
         """
         删除两个节点之间的特定关系或所有关系。
         参数:
-            source_unit_id (str): 源节点ID。
-            target_unit_id (str): Target 节点ID。
+            source_uid (str): 源节点ID。
+            target_uid (str): Target 节点ID。
             relationship_name (Optional[str]): 如果提供，则只删除具有此名称 (作为'type'属性) 的关系。
                                                否则，删除这两个节点之间的所有直接关系。
         """
-        if not self.nx_graph.has_edge(source_unit_id, target_unit_id):
-            logging.warning(f"节点 '{source_unit_id}' 和 '{target_unit_id}' 之间没有直接边。")
+        if not self.nx_graph.has_edge(source_uid, target_uid):
+            logging.warning(f"节点 '{source_uid}' 和 '{target_uid}' 之间没有直接边。")
             return
 
         if relationship_name:
             # NetworkX DiGraph 可以有平行边，但 add_edge 通常会替换。
             # 如果允许多个同名关系，则需要更复杂的删除逻辑。
             # 假设每个 (source, target) 对之间特定类型的关系是唯一的。
-            edge_data = self.nx_graph.get_edge_data(source_unit_id, target_unit_id)
+            edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
             # 对于有向图，通常只有一个直接边。如果有多条边（MultiDiGraph），则需要迭代。
             if edge_data and edge_data.get("type") == relationship_name:
-                self.nx_graph.remove_edge(source_unit_id, target_unit_id)
-                logging.info(f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的关系 '{relationship_name}'。")
+                self.nx_graph.remove_edge(source_uid, target_uid)
+                logging.info(f"已删除从 '{source_uid}' 到 '{target_uid}' 的关系 '{relationship_name}'。")
             else:
-                logging.warning(f"未找到从 '{source_unit_id}' 到 '{target_unit_id}' 的名为 '{relationship_name}' 的关系。")
+                logging.warning(f"未找到从 '{source_uid}' 到 '{target_uid}' 的名为 '{relationship_name}' 的关系。")
         else: # 删除所有直接边
-            self.nx_graph.remove_edge(source_unit_id, target_unit_id)
-            logging.info(f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的所有直接关系。")
+            self.nx_graph.remove_edge(source_uid, target_uid)
+            logging.info(f"已删除从 '{source_uid}' 到 '{target_uid}' 的所有直接关系。")
 
 
-    def get_memory_unit_data(self, unit_id: str) -> Optional[MemoryUnit]:
+    def get_unit_data(self, uid: str) -> Optional[MemoryUnit]:
         """从底层的 SemanticMap 检索内存单元对象。"""
-        return self.semantic_map.get_memory_unit(unit_id)
+        return self.semantic_map.get_unit(uid)
 
     def build_semantic_map_index(self):
         """构建底层 SemanticMap 的 FAISS 索引。"""
@@ -826,60 +900,60 @@ class SemanticGraph:
     # --- 查询API ---
     def search_similarity_in_graph(self,
                                    query_text: Optional[str] = None,
-                                   query_vector: Optional[np.ndarray] = None,
+                                   query_embedding: Optional[np.ndarray] = None,
                                    query_image_path: Optional[str] = None,
                                    k: int = 5,
                                    space_name: Optional[str] = None,
-                                   filter_unit_ids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
+                                   filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """
         在图谱中执行语义相似性搜索 (委托给 SemanticMap)。
         参数:
             query_text (Optional[str]): 查询文本。
-            query_vector (Optional[np.ndarray]): 查询向量。
+            query_embedding (Optional[np.ndarray]): 查询向量。
             query_image_path (Optional[str]): 查询图像的路径。
             k (int): 返回结果数量。
             space_name (Optional[str]): 限制在 SemanticMap 中的特定内存空间内搜索。
-            filter_unit_ids (Optional[Set[str]]): 进一步限制搜索范围的单元ID集合。
+            filter_uids (Optional[Set[str]]): 进一步限制搜索范围的单元ID集合。
         返回:
             List[Tuple[MemoryUnit, float]]: (MemoryUnit, 相似度得分) 列表。
         """
-        if query_vector is not None:
-            return self.semantic_map.search_similarity_by_vector(query_vector, k, space_name, filter_unit_ids)
+        if query_embedding is not None:
+            return self.semantic_map.search_similarity_by_embedding(query_embedding, k, space_name, filter_uids)
         elif query_text is not None:
-            return self.semantic_map.search_similarity_by_text(query_text, k, space_name, filter_unit_ids)
+            return self.semantic_map.search_similarity_by_text(query_text, k, space_name, filter_uids)
         elif query_image_path is not None:
-            return self.semantic_map.search_similarity_by_image(query_image_path, k, space_name, filter_unit_ids)
+            return self.semantic_map.search_similarity_by_image(query_image_path, k, space_name, filter_uids)
         else:
-            logging.warning("必须提供 query_text, query_vector 或 query_image_path 之一进行相似性搜索。")
+            logging.warning("必须提供 query_text, query_embedding 或 query_image_path 之一进行相似性搜索。")
             return []
 
     def traverse_explicit_nodes(self,
-                                unit_id: str,
+                                uid: str,
                                 relationship_type: Optional[str] = None, # 对应于边的 'type' 属性
                                 direction: str = "successors", # "successors", "predecessors", or "all"
                                 space_name: Optional[str] = None) -> List[MemoryUnit]:
         """
         遍历与给定节点通过显式关系连接的邻居节点。
         参数:
-            unit_id (str): 起始节点的ID。
+            uid (str): 起始节点的ID。
             relationship_type (Optional[str]): 要筛选的关系类型 (边属性 'type')。如果为 None，则不按类型筛选。
             direction (str): 遍历方向:
-                             "successors" (默认): 查找 unit_id 指向的节点 (子节点/出边)。
-                             "predecessors": 查找指向 unit_id 的节点 (父节点/入边)。
+                             "successors" (默认): 查找 uid 指向的节点 (子节点/出边)。
+                             "predecessors": 查找指向 uid 的节点 (父节点/入边)。
                              "all": 查找双向的邻居。
             space_name (Optional[str]): 如果提供，则仅返回那些也存在于 SemanticMap 中指定内存空间的邻居。
         返回:
             List[MemoryUnit]: 符合条件的邻居 MemoryUnit 对象列表。
         """
-        if not self.nx_graph.has_node(unit_id):
-            logging.warning(f"节点 '{unit_id}' 不在图中，无法遍历。")
+        if not self.nx_graph.has_node(uid):
+            logging.warning(f"节点 '{uid}' 不在图中，无法遍历。")
             return []
 
         neighbor_ids: Set[str] = set()
         if direction == "successors":
-            for successor in self.nx_graph.successors(unit_id):
+            for successor in self.nx_graph.successors(uid):
                 if relationship_type:
-                    edge_data = self.nx_graph.get_edge_data(unit_id, successor)
+                    edge_data = self.nx_graph.get_edge_data(uid, successor)
                     # 对于有向图，通常只有一个直接边。如果是MultiDiGraph，需要检查所有边。
                     # 假设默认的DiGraph，get_edge_data返回第一个找到的边的属性。
                     # 如果一个 (u,v) 对有多条不同类型的边，这个逻辑需要调整为检查所有边。
@@ -889,27 +963,27 @@ class SemanticGraph:
                 else:
                     neighbor_ids.add(successor)
         elif direction == "predecessors":
-            for predecessor in self.nx_graph.predecessors(unit_id):
+            for predecessor in self.nx_graph.predecessors(uid):
                 if relationship_type:
-                    edge_data = self.nx_graph.get_edge_data(predecessor, unit_id)
+                    edge_data = self.nx_graph.get_edge_data(predecessor, uid)
                     if edge_data and edge_data.get("type") == relationship_type:
                         neighbor_ids.add(predecessor)
                 else:
                     neighbor_ids.add(predecessor)
         elif direction == "all":
             # 获取所有邻居 (包括前驱和后继)
-            all_neighbors_temp = set(self.nx_graph.successors(unit_id))
-            all_neighbors_temp.update(self.nx_graph.predecessors(unit_id))
+            all_neighbors_temp = set(self.nx_graph.successors(uid))
+            all_neighbors_temp.update(self.nx_graph.predecessors(uid))
             
             for neighbor in all_neighbors_temp:
-                # 检查 (unit_id, neighbor) 或 (neighbor, unit_id) 的边
+                # 检查 (uid, neighbor) 或 (neighbor, uid) 的边
                 passes_filter = False
                 if not relationship_type:
                     passes_filter = True
                 else:
-                    if self.nx_graph.has_edge(unit_id, neighbor) and self.nx_graph.get_edge_data(unit_id, neighbor).get("type") == relationship_type:
+                    if self.nx_graph.has_edge(uid, neighbor) and self.nx_graph.get_edge_data(uid, neighbor).get("type") == relationship_type:
                         passes_filter = True
-                    elif self.nx_graph.has_edge(neighbor, unit_id) and self.nx_graph.get_edge_data(neighbor, unit_id).get("type") == relationship_type:
+                    elif self.nx_graph.has_edge(neighbor, uid) and self.nx_graph.get_edge_data(neighbor, uid).get("type") == relationship_type:
                         passes_filter = True
                 if passes_filter:
                     neighbor_ids.add(neighbor)
@@ -921,8 +995,8 @@ class SemanticGraph:
         if space_name:
             space = self.semantic_map.get_memory_space(space_name)
             if space:
-                space_unit_ids = space.get_memory_unit_ids()
-                neighbor_ids.intersection_update(space_unit_ids) # 只保留也在空间内的ID
+                space_uids = space.get_memory_uids()
+                neighbor_ids.intersection_update(space_uids) # 只保留也在空间内的ID
             else:
                 logging.warning(f"内存空间 '{space_name}' 未找到，无法按空间过滤邻居。")
                 return [] # 如果指定了空间但空间不存在，则不返回任何结果
@@ -930,50 +1004,50 @@ class SemanticGraph:
         # 获取 MemoryUnit 对象
         results: List[MemoryUnit] = []
         for nid in neighbor_ids:
-            unit = self.semantic_map.get_memory_unit(nid)
+            unit = self.semantic_map.get_unit(nid)
             if unit:
                 results.append(unit)
         return results
 
     def traverse_implicit_nodes(self,
-                                unit_id: str,
+                                uid: str,
                                 k: int = 5,
                                 space_name: Optional[str] = None) -> List[Tuple[MemoryUnit, float]]:
         """
         基于语义相似性查找与给定节点隐式相关的节点。
         参数:
-            unit_id (str): 起始节点的ID。
+            uid (str): 起始节点的ID。
             k (int): 要查找的相似邻居数量。
             space_name (Optional[str]): 如果提供，则在 SemanticMap 中的指定内存空间内限制搜索。
         返回:
-            List[Tuple[MemoryUnit, float]]: (MemoryUnit, 相似度得分) 列表，不包括 unit_id 本身。
+            List[Tuple[MemoryUnit, float]]: (MemoryUnit, 相似度得分) 列表，不包括 uid 本身。
         """
-        start_unit = self.semantic_map.get_memory_unit(unit_id)
-        if not start_unit or start_unit.vector is None:
-            logging.warning(f"节点 '{unit_id}' 不存在或没有向量，无法进行隐式遍历。")
+        start_unit = self.semantic_map.get_unit(uid)
+        if not start_unit or start_unit.embedding is None:
+            logging.warning(f"节点 '{uid}' 不存在或没有向量，无法进行隐式遍历。")
             return []
 
         # 搜索时排除自身 (如果 SemanticMap 的搜索结果可能包含查询项本身)
         # k+1 然后过滤，或者让 SemanticMap 的搜索处理过滤（如果它支持的话）
-        # 这里假设 search_similarity_by_vector 返回的结果不包含查询向量本身（除非它在数据集中且非常相似）
-        # 通常，我们会获取 k+1 个结果，然后手动排除 unit_id。
+        # 这里假设 search_similarity_by_embedding 返回的结果不包含查询向量本身（除非它在数据集中且非常相似）
+        # 通常，我们会获取 k+1 个结果，然后手动排除 uid。
         
-        # 创建一个过滤器，排除 unit_id 本身
-        filter_ids_to_exclude_self = {uid for uid in self.semantic_map.memory_units.keys() if uid != unit_id}
+        # 创建一个过滤器，排除 uid 本身
+        filter_ids_to_exclude_self = {uid for uid in self.semantic_map.memory_units.keys() if uid != uid}
         
-        # 如果指定了空间，则 filter_ids_to_exclude_self 会被 search_similarity_by_vector 内部的 space_name 逻辑覆盖或合并。
-        # 我们需要确保 unit_id 本身被排除。
-        # 一个更简单的方法是获取k+1个结果，然后从结果中移除unit_id。
+        # 如果指定了空间，则 filter_ids_to_exclude_self 会被 search_similarity_by_embedding 内部的 space_name 逻辑覆盖或合并。
+        # 我们需要确保 uid 本身被排除。
+        # 一个更简单的方法是获取k+1个结果，然后从结果中移除uid。
 
-        similar_units_with_scores = self.semantic_map.search_similarity_by_vector(
-            start_unit.vector,
-            k=k + 1, # 获取稍多一些，以防 unit_id 是最相似的
+        similar_units_with_scores = self.semantic_map.search_similarity_by_embedding(
+            start_unit.embedding,
+            k=k + 1, # 获取稍多一些，以防 uid 是最相似的
             space_name=space_name
         )
         
         results: List[Tuple[MemoryUnit, float]] = []
         for unit, score in similar_units_with_scores:
-            if unit.id != unit_id: # 排除起始节点本身
+            if unit.uid != uid: # 排除起始节点本身
                 results.append((unit, score))
             if len(results) >= k: # 如果已达到k个结果
                 break
@@ -984,9 +1058,9 @@ class SemanticGraph:
         """在底层的 SemanticMap 中创建或获取一个内存空间。"""
         return self.semantic_map.create_memory_space(space_name)
 
-    def add_unit_to_space_in_map(self, unit_id: str, space_name: str):
+    def add_unit_to_space_in_map(self, uid: str, space_name: str):
         """将一个内存单元添加到 SemanticMap 中的指定内存空间。"""
-        self.semantic_map.add_unit_to_space(unit_id, space_name)
+        self.semantic_map.add_unit_to_space(uid, space_name)
 
     # --- 持久化 ---
     def save_graph(self, directory_path: str):
@@ -1069,19 +1143,8 @@ class SemanticGraph:
         user: str = "neo4j", 
         password: str = "password",
         database: str = "neo4j"
-    ) -> bool:
-        """
-        将SemanticGraph中的节点和关系导出到Neo4j数据库
-        
-        参数:
-            uri: Neo4j服务器URI
-            user: 用户名
-            password: 密码
-            database: 数据库名称
-        
-        返回:
-            导出是否成功
-        """
+        ) -> bool:
+        """将SemanticGraph中的节点和关系导出到Neo4j数据库"""
         try:
             # 延迟导入，避免强制依赖
             from neo4j_operator import Neo4jOperator
@@ -1090,25 +1153,25 @@ class SemanticGraph:
             return False
         
         try:
-            # 创建Neo4j操作类
+            # 创建Neo4j操作类 - 修改参数名以匹配Neo4jOperator的定义
             neo4j_op = Neo4jOperator(
-                uri=uri, 
-                user=user, 
-                password=password,
-                database=database
+                neo4j_uri=uri,           # 从uri改为neo4j_uri
+                neo4j_user=user,         # 从user改为neo4j_user
+                neo4j_password=password, # 从password改为neo4j_password
+                neo4j_database=database  # 从database改为neo4j_database
             )
             
-            if not neo4j_op.is_connected:
+            if not neo4j_op.neo4j_connected:
                 logging.error("连接Neo4j失败，无法导出数据")
                 return False
             
             # 导出所有内存单元
             unit_success_count = 0
-            for unit_id, unit in self.semantic_map.memory_units.items():
-                if neo4j_op.add_memory_unit(unit):
+            for uid, unit in self.semantic_map.memory_units.items():
+                if neo4j_op.add_unit(unit):
                     unit_success_count += 1
                 else:
-                    logging.warning(f"导出内存单元 '{unit_id}' 到Neo4j失败")
+                    logging.warning(f"导出内存单元 '{uid}' 到Neo4j失败")
             
             # 导出所有关系
             rel_success_count = 0
@@ -1177,84 +1240,74 @@ if __name__ == '__main__':
     # 2. 创建和添加 MemoryUnit
     unit1_text = "这是一个关于人工智能的文档。"
     unit1_val = {"description": "AI介绍", "type": "文档", "text_content": unit1_text, "author": "系统"}
-    unit1 = MemoryUnit(unit_id="doc_ai_intro", value=unit1_val)
     
     unit2_text = "机器学习是人工智能的一个分支。"
     unit2_val = {"description": "ML定义", "type": "概念", "text_content": unit2_text, "field": "AI"}
-    unit2 = MemoryUnit(unit_id="concept_ml", value=unit2_val)
 
     unit3_text = "深度学习推动了自然语言处理的进步。"
     unit3_val = {"description": "DL对NLP的影响", "type": "观察", "text_content": unit3_text}
-    unit3 = MemoryUnit(unit_id="obs_dl_nlp", value=unit3_val)
-    
-    # 假设我们有一个图像单元 (需要一个真实图像路径)
-    # dummy_image_path = "path/to/your/dummy_image.jpg" # 替换为真实图像路径
-    # if not os.path.exists(dummy_image_path):
-    #     try: # 创建一个虚拟图像用于测试
-    #         Image.new('RGB', (60, 30), color = 'red').save("dummy_image.jpg")
-    #         dummy_image_path = "dummy_image.jpg"
-    #     except ImportError:
-    #         dummy_image_path = None # PIL可能未安装
-    #         logging.warning("PIL/Pillow 未安装，无法创建虚拟图像。跳过图像单元示例。")
 
-    # unit_img1 = None
-    # if dummy_image_path and os.path.exists(dummy_image_path):
-    #     unit_img1_val = {"description": "红色矩形图片", "type": "图像", "image_path": dummy_image_path}
-    #     unit_img1 = MemoryUnit(unit_id="img_red_rect", value=unit_img1_val)
-    #     semantic_map.add_memory_unit(unit_img1, space_names=["图像空间"])
+    unit1 = MemoryUnit(uid="doc_ai_intro", raw_data=unit1_val, metadata={})
+    unit2 = MemoryUnit(uid="concept_ml", raw_data=unit2_val, metadata={})
+    unit3 = MemoryUnit(uid="obs_dl_nlp", raw_data=unit3_val, metadata={})
 
 
-    # 添加文本单元到 map，并指定内容进行嵌入
-    semantic_map.add_memory_unit(unit1, explicit_content_for_embedding=unit1_text, content_type_for_embedding="text", space_names=["AI文档", "通用知识"])
-    semantic_map.add_memory_unit(unit2, explicit_content_for_embedding=unit2_text, content_type_for_embedding="text", space_names=["AI概念"])
-    semantic_map.add_memory_unit(unit3, space_names=["AI观察", "NLP相关"]) # 让map从unit.value推断嵌入内容
+    # 选项2: 通过 SemanticGraph 添加 (推荐，因为它会同时处理 SemanticMap 和 NetworkX 图)
+    semantic_graph = SemanticGraph(semantic_map_instance=semantic_map) # 创建 graph 实例
 
-    # 3. 构建 SemanticMap 索引
-    semantic_map.build_index()
+    semantic_graph.add_unit(unit1, space_names=["AI文档", "通用"], rebuild_semantic_map_index_immediately=False)
+    semantic_graph.add_unit(unit2, space_names=["AI概念", "通用"], rebuild_semantic_map_index_immediately=False)
+    semantic_graph.add_unit(unit3, space_names=["AI观察", "通用"], rebuild_semantic_map_index_immediately=False)
+    # 如果有图像单元也类似添加
+    # if unit_img1:
+    #     semantic_graph.add_unit(unit_img1, space_names=["图像空间"], rebuild_semantic_map_index_immediately=False)
+
+    # 3. 构建 SemanticMap 索引 (通过 graph 实例调用)
+    semantic_graph.build_semantic_map_index()
 
     # 4. 在 SemanticMap 中进行相似性搜索
     logging.info("\n--- SemanticMap 相似性搜索 (全局) ---")
     query1 = "什么是机器学习？"
     similar_results_map = semantic_map.search_similarity_by_text(query_text=query1, k=2)
     for res_unit, score in similar_results_map:
-        logging.info(f"找到单元: {res_unit.id}, 值: {res_unit.value.get('description', res_unit.id)}, 得分: {score:.4f}")
+        logging.info(f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}")
 
     logging.info("\n--- SemanticMap 相似性搜索 (在 'AI文档' 空间) ---")
     similar_results_map_space = semantic_map.search_similarity_by_text(query_text="AI", k=1, space_name="AI文档")
     for res_unit, score in similar_results_map_space:
-        logging.info(f"找到单元: {res_unit.id}, 值: {res_unit.value.get('description', res_unit.id)}, 得分: {score:.4f}")
+        logging.info(f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}")
 
     # 5. 创建 SemanticGraph (使用已有的 semantic_map)
     semantic_graph = SemanticGraph(semantic_map_instance=semantic_map)
 
     # 6. 在 SemanticGraph 中添加单元 (它们已在map中，这里主要是为了在图中创建节点)
-    # 通常，如果单元是新的，会通过 graph.add_memory_unit 添加
+    # 通常，如果单元是新的，会通过 graph.add_unit 添加
     # 如果单元已在map中，我们只需确保它们作为节点存在于图中
-    if not semantic_graph.nx_graph.has_node(unit1.id): semantic_graph.nx_graph.add_node(unit1.id, **unit1.value)
-    if not semantic_graph.nx_graph.has_node(unit2.id): semantic_graph.nx_graph.add_node(unit2.id, **unit2.value)
-    if not semantic_graph.nx_graph.has_node(unit3.id): semantic_graph.nx_graph.add_node(unit3.id, **unit3.value)
-    # if unit_img1 and not semantic_graph.nx_graph.has_node(unit_img1.id): semantic_graph.nx_graph.add_node(unit_img1.id, **unit_img1.value)
+    if not semantic_graph.nx_graph.has_node(unit1.uid): semantic_graph.nx_graph.add_node(unit1.uid, **unit1.raw_data)
+    if not semantic_graph.nx_graph.has_node(unit2.uid): semantic_graph.nx_graph.add_node(unit2.uid, **unit2.raw_data)
+    if not semantic_graph.nx_graph.has_node(unit3.uid): semantic_graph.nx_graph.add_node(unit3.uid, **unit3.raw_data)
+    # if unit_img1 and not semantic_graph.nx_graph.has_node(unit_img1.id): semantic_graph.nx_graph.add_node(unit_img1.id, **unit_img1.raw_data)
 
 
     # 7. 在 SemanticGraph 中添加关系
-    semantic_graph.add_relationship(unit1.id, unit2.id, relationship_name="包含主题", relevance=0.9)
-    semantic_graph.add_relationship(unit2.id, unit3.id, relationship_name="相关概念", bidirectional=True)
+    semantic_graph.add_relationship(unit1.uid, unit2.uid, relationship_name="包含主题", relevance=0.9)
+    semantic_graph.add_relationship(unit2.uid, unit3.uid, relationship_name="相关概念", bidirectional=True)
     
     # 8. 在 SemanticGraph 中进行查询
     logging.info("\n--- SemanticGraph 显式遍历 ('包含主题' 的子节点) ---")
-    explicit_neighbors = semantic_graph.traverse_explicit_nodes(unit_id=unit1.id, relationship_type="包含主题", direction="successors")
+    explicit_neighbors = semantic_graph.traverse_explicit_nodes(uid=unit1.uid, relationship_type="包含主题", direction="successors")
     for neighbor_unit in explicit_neighbors:
-        logging.info(f"'{unit1.id}' 的 '{'包含主题'}' 子节点: {neighbor_unit.id} - {neighbor_unit.value.get('description')}")
+        logging.info(f"'{unit1.uid}' 的 '{'包含主题'}' 子节点: {neighbor_unit.uid} - {neighbor_unit.raw_data.get('description')}")
 
     logging.info("\n--- SemanticGraph 隐式遍历 (与 unit1 语义相似的节点) ---")
-    implicit_neighbors = semantic_graph.traverse_implicit_nodes(unit_id=unit1.id, k=2)
+    implicit_neighbors = semantic_graph.traverse_implicit_nodes(uid=unit1.uid, k=2)
     for neighbor_unit, score in implicit_neighbors:
-        logging.info(f"与 '{unit1.id}' 语义相似的节点: {neighbor_unit.id} - {neighbor_unit.value.get('description')}, 得分: {score:.4f}")
+        logging.info(f"与 '{unit1.uid}' 语义相似的节点: {neighbor_unit.uid} - {neighbor_unit.raw_data.get('description')}, 得分: {score:.4f}")
 
     logging.info("\n--- SemanticGraph 隐式遍历 (与 unit1 语义相似的节点, 在 'AI概念' 空间) ---")
-    implicit_neighbors_space = semantic_graph.traverse_implicit_nodes(unit_id=unit1.id, k=1, space_name="AI概念")
+    implicit_neighbors_space = semantic_graph.traverse_implicit_nodes(uid=unit1.uid, k=1, space_name="AI概念")
     for neighbor_unit, score in implicit_neighbors_space:
-        logging.info(f"与 '{unit1.id}' 语义相似 (在 'AI概念' 空间): {neighbor_unit.id} - {neighbor_unit.value.get('description')}, 得分: {score:.4f}")
+        logging.info(f"与 '{unit1.uid}' 语义相似 (在 'AI概念' 空间): {neighbor_unit.uid} - {neighbor_unit.raw_data.get('description')}, 得分: {score:.4f}")
 
     # 9. 显示图谱摘要
     semantic_graph.display_graph_summary()
@@ -1263,7 +1316,7 @@ if __name__ == '__main__':
     semantic_map.export_to_milvus(
         host="localhost",
         port="19530",
-        collection_name="my_memory_units"
+        collection_name="hippo_memory_units"
     )
 
     # 示例2: 将SemanticGraph导出到Neo4j
@@ -1286,9 +1339,9 @@ if __name__ == '__main__':
         
         # 测试加载后的图谱
         logging.info("\n--- 测试加载后的图谱: 隐式遍历 (与 unit1 语义相似的节点) ---")
-        loaded_implicit_neighbors = loaded_graph.traverse_implicit_nodes(unit_id=unit1.id, k=1)
+        loaded_implicit_neighbors = loaded_graph.traverse_implicit_nodes(uid=unit1.uid, k=1)
         for neighbor_unit, score in loaded_implicit_neighbors:
-            logging.info(f"与 '{unit1.id}' 语义相似的节点: {neighbor_unit.id} - {neighbor_unit.value.get('description')}, 得分: {score:.4f}")
+            logging.info(f"与 '{unit1.uid}' 语义相似的节点: {neighbor_unit.uid} - {neighbor_unit.raw_data.get('description')}, 得分: {score:.4f}")
 
     except FileNotFoundError as e:
         logging.error(f"加载失败，因为保存目录或文件未完全创建/找到: {e}")
