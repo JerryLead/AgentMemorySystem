@@ -1,0 +1,1 @@
+模型加载慢：export TRANSFORMERS_OFFLINE=1
