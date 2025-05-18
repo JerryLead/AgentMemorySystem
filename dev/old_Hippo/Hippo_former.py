@@ -4,8 +4,9 @@ from datetime import datetime
 import os
 import pickle
 import logging
-from typing import Dict, Any, Optional, List, Set, Tuple, Union
 
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -16,7 +17,7 @@ import networkx as nx
 logging.basicConfig(
     format="%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO
+    level=logging.INFO,
 )
 
 # --- 基础数据结构 ---
@@ -106,14 +107,19 @@ class MemoryUnit:
 
 class MemorySpace:
     """
-    内存空间 (MemorySpace) 用于组织和管理一组相关的内存单元。
-    一个内存单元可以属于多个内存空间。
+    记忆空间 (MemorySpace) 用于组织和管理一组相关的记忆单元，一个记忆空间内的记忆单元拥有相同的类型。
+    一个记忆单元可以属于多个记忆空间。
     """
-    def __init__(self, name: str):
+
+    def __init__(
+        self,
+        ms_name: str,
+        embedding_dim: int = 512,
+    ):
         """
-        初始化一个内存空间。
+        初始化一个记忆空间。
         参数:
-            name (str): 内存空间的名称，应唯一。
+            ms_name (str): 记忆空间的名称，应唯一。
         """
         if not isinstance(name, str) or not name.strip():
             raise TypeError("内存空间名称 (name) 不能为空字符串。")
@@ -164,18 +170,19 @@ class MemorySpace:
 
 class SemanticMap:
     """
-    语义地图 (SemanticMap) 负责存储内存单元及其向量嵌入，并支持基于相似度的搜索。
-    它还管理内存空间，允许在特定上下文中进行操作。
+    语义地图 (SemanticMap) 负责存储记忆空间及其向量嵌入，并支持基于相似度的搜索。
+    它还管理记忆空间，允许在特定上下文中进行操作。
     类似于一个向量数据库。
     """
     DEFAULT_TEXT_EMBEDDING_KEY = "text_content" # MemoryUnit.raw_data 中用于文本嵌入的默认键
     DEFAULT_IMAGE_EMBEDDING_KEY = "image_path" # MemoryUnit.raw_data 中用于图像嵌入的默认键
 
-    def __init__(self,
-                 image_embedding_model_name: str = "clip-ViT-B-32",
-                 text_embedding_model_name: str = "sentence-transformers/clip-ViT-B-32-multilingual-v1",
-                 embedding_dim: int = 512,
-                 faiss_index_type: str = "IDMap,Flat"): # 使用IDMap来支持按ID删除
+    def __init__(
+        self,
+        image_embedding_model_name: str = "clip-ViT-B-32",
+        text_embedding_model_name: str = "sentence-transformers/clip-ViT-B-32-multilingual-v1",
+        embedding_dim: int = 512,
+    ):  # 使用IDMap来支持按ID删除
         """
         初始化语义地图。
         参数:
@@ -245,22 +252,22 @@ class SemanticMap:
         """为给定文本生成嵌入向量。"""
         if not text or not isinstance(text, str):
             logging.warning("尝试为无效文本生成嵌入。")
-            return None
+            raise ValueError("无效的文本")
         try:
             emb = self.text_model.encode(text)
             return emb.astype(np.float32)
         except Exception as e:
             logging.error(f"生成文本嵌入失败: '{text[:50]}...' - {e}")
-            return None
+            raise e
 
     def _get_image_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """为给定图像路径生成嵌入向量。"""
         if not image_path or not isinstance(image_path, str):
             logging.warning("尝试为无效图像路径生成嵌入。")
-            return None
+            raise ValueError("无效的图像路径")
         if not os.path.isfile(image_path):
             logging.error(f"图像文件未找到: {image_path}")
-            return None
+            raise FileNotFoundError(f"图像文件未找到：{image_path}")
         try:
             img = Image.open(image_path)
             emb = self.image_model.encode(img)
@@ -318,18 +325,20 @@ class SemanticMap:
                         space_names: Optional[List[str]] = None,
                         rebuild_index_immediately: bool = False):
         """
-        向语义地图添加一个新的内存单元。
+        向语义地图添加一个新的记忆单元。
         如果单元已存在，则其值和嵌入将被更新。
         参数:
             unit (MemoryUnit): 要添加或更新的内存单元对象。
             explicit_content_for_embedding (Optional[Any]): 用于生成嵌入的显式内容。如果提供，将覆盖从 unit.raw_data 推断的内容。
             content_type_for_embedding (Optional[str]): explicit_content_for_embedding 的类型 ("text" 或 "image_path")。
-            space_names (Optional[List[str]]): 要将此单元添加到的内存空间的名称列表。如果空间不存在，将创建它们。
+            ms_names (Optional[List[str]]): 要将此单元添加到的记忆空间的名称列表。如果空间不存在，将创建它们。
             rebuild_index_immediately (bool): 是否在添加后立即重建FAISS索引。对于批量添加，建议设置为False，并在最后统一重建。
         """
         if not isinstance(unit, MemoryUnit):
-            logging.error("尝试添加的不是 MemoryUnit 对象。")
-            return
+            raise TypeError("尝试添加的不是 MemoryUnit 对象。")
+
+        if not ms_names:
+            raise ValueError("需至少指定一个记忆空间")
 
         # 生成或更新嵌入
         new_embedding = self._generate_embedding_for_unit(unit, explicit_content_for_embedding, content_type_for_embedding)
@@ -362,10 +371,8 @@ class SemanticMap:
             del self.memory_units[uid]
             
             # 从所有内存空间中移除
-            for space_name, space_obj in self.memory_spaces.items():
-                space_obj.remove_unit(uid)
-            # for space in self.memory_spaces:
-            #     space.remove_unit(uid)
+            for space in self.memory_spaces:
+                space.remove_unit(uid)
             
             # 从FAISS索引中移除 (如果已构建且包含该单元)
             if self.faiss_index and uid in self._uid_to_internal_faiss_id:
@@ -390,7 +397,7 @@ class SemanticMap:
 
     def build_index(self):
         """
-        根据当前所有具有有效嵌入的内存单元构建（或重建）FAISS索引。
+        根据当前所有具有有效嵌入的记忆单元构建（或重建）FAISS索引。
         """
         if not self.memory_units:
             logging.info("没有内存单元可用于构建索引。")
@@ -458,7 +465,7 @@ class SemanticMap:
                                 space_name: Optional[str] = None,
                                 filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """
-        通过查询向量在语义地图中搜索相似的内存单元。
+        通过查询向量在语义地图中搜索相似的记忆单元。
         参数:
             query_embedding (np.ndarray): 用于查询的嵌入向量。
             k (int): 要返回的最相似单元的数量。
@@ -608,7 +615,7 @@ class SemanticMap:
             directory_path (str): 用于保存文件的目录路径。如果不存在，将尝试创建。
         """
         os.makedirs(directory_path, exist_ok=True)
-        
+
         # 1. 保存 MemoryUnit 和 MemorySpace 对象 (使用 pickle)
         with open(os.path.join(directory_path, "semantic_map_data.pkl"), "wb") as f:
             pickle.dump({
@@ -622,14 +629,20 @@ class SemanticMap:
         
         # 2. 保存 FAISS 索引
         if self.faiss_index:
-            faiss.write_index(self.faiss_index, os.path.join(directory_path, "semantic_map.faissindex"))
-        
+            faiss.write_index(
+                self.faiss_index,
+                os.path.join(directory_path, "semantic_map.faissindex"),
+            )
+
         logging.info(f"SemanticMap 已保存到目录: '{directory_path}'")
 
     @classmethod
-    def load_map(cls, directory_path: str,
-                 image_embedding_model_name: Optional[str] = None, # 加载时可以覆盖模型名称
-                 text_embedding_model_name: Optional[str] = None) -> 'SemanticMap':
+    def load_map(
+        cls,
+        directory_path: str,
+        image_embedding_model_name: Optional[str] = None,  # 加载时可以覆盖模型名称
+        text_embedding_model_name: Optional[str] = None,
+    ) -> "SemanticMap":
         """
         从指定目录加载 SemanticMap 的状态。
         参数:
@@ -649,24 +662,34 @@ class SemanticMap:
             saved_state = pickle.load(f)
 
         # 使用保存的参数或加载时提供的参数初始化实例
-        img_model = image_embedding_model_name if image_embedding_model_name else "clip-ViT-B-32" # 默认值
-        txt_model = text_embedding_model_name if text_embedding_model_name else "sentence-transformers/clip-ViT-B-32-multilingual-v1" # 默认值
-        
+        img_model = (
+            image_embedding_model_name
+            if image_embedding_model_name
+            else "clip-ViT-B-32"
+        )  # 默认值
+        txt_model = (
+            text_embedding_model_name
+            if text_embedding_model_name
+            else "sentence-transformers/clip-ViT-B-32-multilingual-v1"
+        )  # 默认值
+
         # 从保存的状态中获取参数，如果存在的话
         embedding_dim = saved_state.get("embedding_dim", 512)
-        faiss_index_type = saved_state.get("faiss_index_type", "IDMap,Flat") # 确保有默认值
+        faiss_index_type = saved_state.get(
+            "faiss_index_type", "IDMap,Flat"
+        )  # 确保有默认值
 
         # 如果加载时提供了模型名称，则使用它们
         # (注意：如果模型名称与保存时的不一致，嵌入维度也可能需要调整，这里简化处理)
         # 实际应用中，模型和维度应保持一致或有兼容性策略
 
         instance = cls(
-            image_embedding_model_name=img_model, # 实际使用时应确保与保存时一致或兼容
+            image_embedding_model_name=img_model,  # 实际使用时应确保与保存时一致或兼容
             text_embedding_model_name=txt_model,  # 同上
             embedding_dim=embedding_dim,
-            faiss_index_type=faiss_index_type
+            faiss_index_type=faiss_index_type,
         )
-        
+
         instance.memory_units = saved_state["memory_units"]
         instance.memory_spaces = saved_state["memory_spaces"]
         instance._uid_to_internal_faiss_id = saved_state.get("_uid_to_internal_faiss_id", {})
@@ -675,18 +698,24 @@ class SemanticMap:
         if os.path.exists(index_file):
             try:
                 instance.faiss_index = faiss.read_index(index_file)
-                logging.info(f"FAISS 索引已从 '{index_file}' 加载。包含 {instance.faiss_index.ntotal} 个向量。")
+                logging.info(
+                    f"FAISS 索引已从 '{index_file}' 加载。包含 {instance.faiss_index.ntotal} 个向量。"
+                )
                 # 验证维度
                 if instance.faiss_index.d != instance.embedding_dim:
-                    logging.warning(f"加载的FAISS索引维度 ({instance.faiss_index.d}) 与 SemanticMap 期望维度 ({instance.embedding_dim}) 不符。可能需要重建索引。")
+                    logging.warning(
+                        f"加载的FAISS索引维度 ({instance.faiss_index.d}) 与 SemanticMap 期望维度 ({instance.embedding_dim}) 不符。可能需要重建索引。"
+                    )
             except Exception as e:
                 logging.error(f"加载 FAISS 索引失败: {e}。索引将为空，可能需要重建。")
-                instance.faiss_index = None # 确保失败时索引为空
-                instance._init_faiss_index() # 尝试重新初始化一个空索引结构
+                instance.faiss_index = None  # 确保失败时索引为空
+                instance._init_faiss_index()  # 尝试重新初始化一个空索引结构
         else:
-            logging.warning(f"FAISS 索引文件 '{index_file}' 未找到。索引将为空，需要重建。")
-            instance._init_faiss_index() # 初始化一个空索引结构
-            
+            logging.warning(
+                f"FAISS 索引文件 '{index_file}' 未找到。索引将为空，需要重建。"
+            )
+            instance._init_faiss_index()  # 初始化一个空索引结构
+
         logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载。")
         return instance
     
@@ -762,23 +791,28 @@ class SemanticMap:
             logging.error(f"导出到Milvus失败: {e}")
             return False
 
+
 # --- 语义图谱 ---
+
 
 class SemanticGraph:
     """
     语义图谱 (SemanticGraph) 结合了 SemanticMap 的向量存储/搜索能力和 NetworkX 的图结构管理能力。
-    它存储内存单元作为节点，并允许在它们之间定义显式的命名关系。
+    它存储记忆单元作为节点，并允许在它们之间定义显式的命名关系。
     查询可以利用显式图遍历和隐式语义相似性。
     """
-    def __init__(self, semantic_map_instance: Optional[SemanticMap] = None):
+
+    def __init__(self, semantic_map: SemanticMap = None):
         """
         初始化语义图谱。
         参数:
             semantic_map_instance (Optional[SemanticMap]): 一个 SemanticMap 实例。
                                                           如果为 None，将创建一个新的默认 SemanticMap。
         """
-        self.semantic_map: SemanticMap = semantic_map_instance if semantic_map_instance else SemanticMap()
-        self.nx_graph: nx.DiGraph = nx.DiGraph() # 使用 NetworkX有向图存储节点和显式关系
+        self.semantic_map: SemanticMap = semantic_map if semantic_map else SemanticMap()
+        self.nx_graph: nx.DiGraph = (
+            nx.DiGraph()
+        )  # 使用 NetworkX有向图存储节点和显式关系
         logging.info("SemanticGraph 已初始化。")
 
     def add_unit(self,
@@ -788,23 +822,21 @@ class SemanticGraph:
                         space_names: Optional[List[str]] = None,
                         rebuild_semantic_map_index_immediately: bool = False):
         """
-        向图谱添加一个内存单元 (节点)。
+        向图谱添加一个记忆单元 (节点)。
         单元也会被添加到内部的 SemanticMap 中。
         参数:
-            unit (MemoryUnit): 要添加的内存单元。
+            unit (MemoryUnit): 要添加的记忆单元。
             explicit_content_for_embedding, content_type_for_embedding: 传递给 SemanticMap 用于嵌入生成。
-            space_names (Optional[List[str]]): 要将此单元添加到的 SemanticMap 中的内存空间名称。
+            ms_names (Optional[List[str]]): 要将此单元添加到的 SemanticMap 中的记忆空间名称。
             rebuild_semantic_map_index_immediately (bool): 是否在添加后立即重建 SemanticMap 的 FAISS 索引。
         """
         # 1. 将单元添加到 SemanticMap
         self.semantic_map.add_unit(
             unit,
-            explicit_content_for_embedding,
-            content_type_for_embedding,
-            space_names,
-            rebuild_index_immediately=rebuild_semantic_map_index_immediately # 注意这里传递的是否立即重建map索引
+            ms_names,
+            rebuild_index_immediately=rebuild_semantic_map_index_immediately,  # 注意这里传递的是否立即重建map索引
         )
-        
+
         # 2. 将单元ID作为节点添加到 NetworkX 图中 (如果尚不存在)
         if not self.nx_graph.has_node(unit.uid):
             # 可以在节点上存储来自 unit.raw_data 的一些属性，如果需要的话
@@ -822,7 +854,7 @@ class SemanticGraph:
                          bidirectional: bool = False,
                          **kwargs: Any): # 允许添加其他关系属性
         """
-        在两个已存在的内存单元 (节点) 之间添加一条显式关系 (边)。
+        在两个已存在的记忆单元 (节点) 之间添加一条显式关系 (边)。
         参数:
             source_uid (str): 源节点的ID。
             target_uid (str): 目标节点的ID。
@@ -943,7 +975,7 @@ class SemanticGraph:
                              "successors" (默认): 查找 uid 指向的节点 (子节点/出边)。
                              "predecessors": 查找指向 uid 的节点 (父节点/入边)。
                              "all": 查找双向的邻居。
-            space_name (Optional[str]): 如果提供，则仅返回那些也存在于 SemanticMap 中指定内存空间的邻居。
+            ms_name (Optional[str]): 如果提供，则仅返回那些也存在于 SemanticMap 中指定记忆空间的邻居。
         返回:
             List[MemoryUnit]: 符合条件的邻居 MemoryUnit 对象列表。
         """
@@ -960,7 +992,7 @@ class SemanticGraph:
                     # 假设默认的DiGraph，get_edge_data返回第一个找到的边的属性。
                     # 如果一个 (u,v) 对有多条不同类型的边，这个逻辑需要调整为检查所有边。
                     # 对于简单的DiGraph，如果 (u,v) 存在，则只有一条边。
-                    if edge_data and edge_data.get("type") == relationship_type:
+                    if edge_data and edge_data.get("type") == rel_type:
                         neighbor_ids.add(successor)
                 else:
                     neighbor_ids.add(successor)
@@ -980,7 +1012,7 @@ class SemanticGraph:
             for neighbor in all_neighbors_temp:
                 # 检查 (uid, neighbor) 或 (neighbor, uid) 的边
                 passes_filter = False
-                if not relationship_type:
+                if not rel_type:
                     passes_filter = True
                 else:
                     if self.nx_graph.has_edge(uid, neighbor) and self.nx_graph.get_edge_data(uid, neighbor).get("type") == relationship_type:
@@ -990,18 +1022,20 @@ class SemanticGraph:
                 if passes_filter:
                     neighbor_ids.add(neighbor)
         else:
-            logging.warning(f"无效的遍历方向: '{direction}'。应为 'successors', 'predecessors', 或 'all'。")
+            logging.warning(
+                f"无效的遍历方向: '{direction}'。应为 'successors', 'predecessors', 或 'all'。"
+            )
             return []
 
-        # 根据 space_name 过滤 (如果提供)
-        if space_name:
-            space = self.semantic_map.get_memory_space(space_name)
+        # 根据 ms_name 过滤 (如果提供)
+        if ms_name:
+            space = self.semantic_map.get_memory_space(ms_name)
             if space:
                 space_uids = space.get_memory_uids()
                 neighbor_ids.intersection_update(space_uids) # 只保留也在空间内的ID
             else:
-                logging.warning(f"内存空间 '{space_name}' 未找到，无法按空间过滤邻居。")
-                return [] # 如果指定了空间但空间不存在，则不返回任何结果
+                logging.warning(f"记忆空间 '{ms_name}' 未找到，无法按空间过滤邻居。")
+                return []  # 如果指定了空间但空间不存在，则不返回任何结果
 
         # 获取 MemoryUnit 对象
         results: List[MemoryUnit] = []
@@ -1020,7 +1054,7 @@ class SemanticGraph:
         参数:
             uid (str): 起始节点的ID。
             k (int): 要查找的相似邻居数量。
-            space_name (Optional[str]): 如果提供，则在 SemanticMap 中的指定内存空间内限制搜索。
+            ms_name (Optional[str]): 如果提供，则在 SemanticMap 中的指定记忆空间内限制搜索。
         返回:
             List[Tuple[MemoryUnit, float]]: (MemoryUnit, 相似度得分) 列表，不包括 uid 本身。
         """
@@ -1046,12 +1080,12 @@ class SemanticGraph:
             k=k + 1, # 获取稍多一些，以防 uid 是最相似的
             space_name=space_name
         )
-        
+
         results: List[Tuple[MemoryUnit, float]] = []
         for unit, score in similar_units_with_scores:
             if unit.uid != uid: # 排除起始节点本身
                 results.append((unit, score))
-            if len(results) >= k: # 如果已达到k个结果
+            if len(results) >= top_k:  # 如果已达到k个结果
                 break
         return results
 
@@ -1073,15 +1107,15 @@ class SemanticGraph:
             directory_path (str): 保存文件的目录。
         """
         os.makedirs(directory_path, exist_ok=True)
-        
+
         # 1. 保存 SemanticMap
         self.semantic_map.save_map(os.path.join(directory_path, "semantic_map_data"))
-        
+
         # 2. 保存 NetworkX 图 (例如，使用 GML 或 pickle)
         nx_graph_file = os.path.join(directory_path, "semantic_graph.gml")
         try:
             nx.write_gml(self.nx_graph, nx_graph_file)
-        except Exception as e: # GML 可能不支持所有数据类型作为属性，pickle 更通用
+        except Exception as e:  # GML 可能不支持所有数据类型作为属性，pickle 更通用
             logging.warning(f"以 GML 格式保存 NetworkX 图失败: {e}。尝试使用 pickle。")
             nx_graph_file_pkl = os.path.join(directory_path, "semantic_graph.pkl")
             with open(nx_graph_file_pkl, "wb") as f:
@@ -1091,9 +1125,12 @@ class SemanticGraph:
         logging.info(f"SemanticGraph 已保存到目录: '{directory_path}'")
 
     @classmethod
-    def load_graph(cls, directory_path: str,
-                   image_embedding_model_name: Optional[str] = None,
-                   text_embedding_model_name: Optional[str] = None) -> 'SemanticGraph':
+    def load_graph(
+        cls,
+        directory_path: str,
+        image_embedding_model_name: Optional[str] = None,
+        text_embedding_model_name: Optional[str] = None,
+    ) -> "SemanticGraph":
         """
         从指定目录加载 SemanticGraph 的状态。
         参数:
@@ -1106,11 +1143,11 @@ class SemanticGraph:
         loaded_map = SemanticMap.load_map(
             os.path.join(directory_path, "semantic_map_data"),
             image_embedding_model_name=image_embedding_model_name,
-            text_embedding_model_name=text_embedding_model_name
+            text_embedding_model_name=text_embedding_model_name,
         )
-        
+
         instance = cls(semantic_map_instance=loaded_map)
-        
+
         # 2. 加载 NetworkX 图
         nx_graph_file_gml = os.path.join(directory_path, "semantic_graph.gml")
         nx_graph_file_pkl = os.path.join(directory_path, "semantic_graph.pkl")
@@ -1120,20 +1157,28 @@ class SemanticGraph:
                 instance.nx_graph = nx.read_gml(nx_graph_file_gml)
                 logging.info(f"NetworkX 图已从 GML 文件 '{nx_graph_file_gml}' 加载。")
             except Exception as e:
-                logging.error(f"从 GML 文件加载 NetworkX 图失败: {e}。检查是否存在 pickle 文件。")
+                logging.error(
+                    f"从 GML 文件加载 NetworkX 图失败: {e}。检查是否存在 pickle 文件。"
+                )
                 if os.path.exists(nx_graph_file_pkl):
                     with open(nx_graph_file_pkl, "rb") as f:
                         instance.nx_graph = pickle.load(f)
-                    logging.info(f"NetworkX 图已从 pickle 文件 '{nx_graph_file_pkl}' 加载。")
+                    logging.info(
+                        f"NetworkX 图已从 pickle 文件 '{nx_graph_file_pkl}' 加载。"
+                    )
                 else:
-                    logging.warning("GML 和 pickle 格式的 NetworkX 图文件均未找到或加载失败。图将为空。")
-                    instance.nx_graph = nx.DiGraph() # 创建一个空图
+                    logging.warning(
+                        "GML 和 pickle 格式的 NetworkX 图文件均未找到或加载失败。图将为空。"
+                    )
+                    instance.nx_graph = nx.DiGraph()  # 创建一个空图
         elif os.path.exists(nx_graph_file_pkl):
-             with open(nx_graph_file_pkl, "rb") as f:
+            with open(nx_graph_file_pkl, "rb") as f:
                 instance.nx_graph = pickle.load(f)
-             logging.info(f"NetworkX 图已从 pickle 文件 '{nx_graph_file_pkl}' 加载。")
+            logging.info(f"NetworkX 图已从 pickle 文件 '{nx_graph_file_pkl}' 加载。")
         else:
-            logging.warning(f"NetworkX 图文件 (GML 或 pickle) 在 '{directory_path}' 中未找到。图将为空。")
+            logging.warning(
+                f"NetworkX 图文件 (GML 或 pickle) 在 '{directory_path}' 中未找到。图将为空。"
+            )
             instance.nx_graph = nx.DiGraph()
 
         logging.info(f"SemanticGraph 已从目录 '{directory_path}' 加载。")
@@ -1200,18 +1245,20 @@ class SemanticGraph:
     def display_graph_summary(self):
         """打印图谱的摘要信息。"""
         num_map_units = len(self.semantic_map.memory_units)
-        num_map_indexed = self.semantic_map.faiss_index.ntotal if self.semantic_map.faiss_index else 0
-        num_map_spaces = len(self.semantic_map.memory_spaces)
-        
+        num_map_indexed = (
+            self.semantic_map.faiss_index.ntotal if self.semantic_map.faiss_index else 0
+        )
+        num_map_spaces = len(self.semantic_map._memory_spaces)
+
         num_graph_nodes = self.nx_graph.number_of_nodes()
         num_graph_edges = self.nx_graph.number_of_edges()
 
         summary = (
             f"--- SemanticGraph 摘要 ---\n"
             f"SemanticMap:\n"
-            f"  - 内存单元总数: {num_map_units}\n"
+            f"  - 记忆单元总数: {num_map_units}\n"
             f"  - 已索引向量数: {num_map_indexed}\n"
-            f"  - 内存空间数: {num_map_spaces} ({list(self.semantic_map.memory_spaces.keys())})\n"
+            f"  - 记忆空间数: {num_map_spaces} ({list(self.semantic_map._memory_spaces.keys())})\n"
             f"NetworkX Graph:\n"
             f"  - 节点数: {num_graph_nodes}\n"
             f"  - 边数 (关系数): {num_graph_edges}\n"
@@ -1221,7 +1268,7 @@ class SemanticGraph:
         logging.info(summary.replace("\n", " | "))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # --- 示例用法 ---
     logging.info("开始 Hippo.py 示例用法...")
 
@@ -1230,7 +1277,7 @@ if __name__ == '__main__':
     # text_model_for_test = "paraphrase-MiniLM-L6-v2" # 384 dim
     # image_model_for_test = "clip-ViT-B-32" # 512 dim, 但这里为了统一，假设都用一个维度
     # 如果模型维度不同，需要更复杂的处理或使用能输出相同维度的模型对
-    
+
     # 为简单起见，假设使用默认模型和维度
     semantic_map = SemanticMap(embedding_dim=512)
     semantic_map = SemanticMap(
@@ -1270,17 +1317,21 @@ if __name__ == '__main__':
     # 4. 在 SemanticMap 中进行相似性搜索
     logging.info("\n--- SemanticMap 相似性搜索 (全局) ---")
     query1 = "什么是机器学习？"
-    similar_results_map = semantic_map.search_similarity_by_text(query_text=query1, k=2)
+    similar_results_map = semantic_map.search_similarity_by_text(
+        query_text=query1, top_k=2
+    )
     for res_unit, score in similar_results_map:
         logging.info(f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}")
 
     logging.info("\n--- SemanticMap 相似性搜索 (在 'AI文档' 空间) ---")
-    similar_results_map_space = semantic_map.search_similarity_by_text(query_text="AI", k=1, space_name="AI文档")
+    similar_results_map_space = semantic_map.search_similarity_by_text(
+        query_text="AI", top_k=1, ms_name="AI文档"
+    )
     for res_unit, score in similar_results_map_space:
         logging.info(f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}")
 
     # 5. 创建 SemanticGraph (使用已有的 semantic_map)
-    semantic_graph = SemanticGraph(semantic_map_instance=semantic_map)
+    semantic_graph = SemanticGraph(semantic_map=semantic_map)
 
     # 6. 在 SemanticGraph 中添加单元 (它们已在map中，这里主要是为了在图中创建节点)
     # 通常，如果单元是新的，会通过 graph.add_unit 添加
@@ -1333,12 +1384,12 @@ if __name__ == '__main__':
     save_dir = "hippo_save_data"
     logging.info(f"\n--- 保存 SemanticGraph 到 '{save_dir}' ---")
     semantic_graph.save_graph(save_dir)
-    
+
     logging.info(f"\n--- 从 '{save_dir}' 加载 SemanticGraph ---")
     try:
         loaded_graph = SemanticGraph.load_graph(save_dir)
         loaded_graph.display_graph_summary()
-        
+
         # 测试加载后的图谱
         logging.info("\n--- 测试加载后的图谱: 隐式遍历 (与 unit1 语义相似的节点) ---")
         loaded_implicit_neighbors = loaded_graph.traverse_implicit_nodes(uid=unit1.uid, k=1)
@@ -1349,7 +1400,6 @@ if __name__ == '__main__':
         logging.error(f"加载失败，因为保存目录或文件未完全创建/找到: {e}")
     except Exception as e:
         logging.error(f"加载或测试加载的图谱时发生错误: {e}", exc_info=True)
-
 
     # 清理虚拟图像
     # if dummy_image_path and dummy_image_path == "dummy_image.jpg" and os.path.exists("dummy_image.jpg"):

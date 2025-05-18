@@ -13,7 +13,7 @@ from pymilvus import (
     MilvusException
 )
 
-from Hippo import MemoryUnit
+from dev.Hippo import MemoryUnit
 
 # class DateTimeEncoder(json.JSONEncoder):
 #     """处理datetime对象的JSON编码器"""

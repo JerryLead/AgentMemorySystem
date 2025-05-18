@@ -7,7 +7,7 @@ import json
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 from sentence_transformers import SentenceTransformer
-from Hippo import MemoryUnit
+from dev.Hippo import MemoryUnit
 from milvus_operator import MilvusOperator
 
 class Neo4jOperator:
