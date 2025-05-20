@@ -11,6 +11,9 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 import networkx as nx
+from .milvus_operator import MilvusOperator
+from .neo4j_operator import Neo4jOperator
+from .memory_unit import MemoryUnit
 
 # 配置日志记录器
 logging.basicConfig(
@@ -48,61 +51,61 @@ logging.basicConfig(
 #         embedding_shape = self.embedding.shape if self.embedding is not None else None
 #         return f"MemoryUnit(id='{self.id}', raw_data={self.raw_data}, embedding_shape={embedding_shape})"
 
-class MemoryUnit:
-    """
-    记忆单元 (MemoryUnit) 代表系统中的一个基本信息片段。
-    它包含一个唯一的ID、一个存储具体数据的字典以及一个可选的向量表示。
-    """
+# class MemoryUnit:
+#     """
+#     记忆单元 (MemoryUnit) 代表系统中的一个基本信息片段。
+#     它包含一个唯一的ID、一个存储具体数据的字典以及一个可选的向量表示。
+#     """
 
-    def __init__(
-        self,
-        uid: str,
-        raw_data: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None,
-        embedding: Optional[np.ndarray] = None,
-    ):
-        """
-        初始化一个记忆单元。
-        参数:
-            unit_id (str): 记忆单元的唯一标识符。
-            value (Dict[str, Any]): 包含记忆单元具体内容的字典。例如: {"text": "一些描述", "image_path": "路径/到/图片.jpg", "type": "文档"}
-            embedding (Optional[np.ndarray]): 该单元的向量表示。如果为None，则可以由SemanticMap生成。
-        """
-        if not isinstance(uid, str) or not uid.strip():
-            raise ValueError("记忆单元UID不能为空")
-        if not isinstance(raw_data, dict):
-            raise ValueError("记忆单元Raw Data必须是一个字典")
-        # 修改逻辑，允许metadata为None
-        if metadata is not None and not isinstance(metadata, dict):
-            raise ValueError(f"记忆单元Metadata必须是一个字典")
+#     def __init__(
+#         self,
+#         uid: str,
+#         raw_data: Dict[str, Any],
+#         metadata: Optional[Dict[str, Any]] = None,
+#         embedding: Optional[np.ndarray] = None,
+#     ):
+#         """
+#         初始化一个记忆单元。
+#         参数:
+#             unit_id (str): 记忆单元的唯一标识符。
+#             value (Dict[str, Any]): 包含记忆单元具体内容的字典。例如: {"text": "一些描述", "image_path": "路径/到/图片.jpg", "type": "文档"}
+#             embedding (Optional[np.ndarray]): 该单元的向量表示。如果为None，则可以由SemanticMap生成。
+#         """
+#         if not isinstance(uid, str) or not uid.strip():
+#             raise ValueError("记忆单元UID不能为空")
+#         if not isinstance(raw_data, dict):
+#             raise ValueError("记忆单元Raw Data必须是一个字典")
+#         # 修改逻辑，允许metadata为None
+#         if metadata is not None and not isinstance(metadata, dict):
+#             raise ValueError(f"记忆单元Metadata必须是一个字典")
 
-        self.uid: str = uid
-        self.raw_data: Dict[str, Any] = raw_data
-        self.metadata = metadata or {
-            "created": str(datetime.now()),
-            "updated": str(datetime.now()),
-        }
-        self.embedding: Optional[np.ndarray] = embedding
+#         self.uid: str = uid
+#         self.raw_data: Dict[str, Any] = raw_data
+#         self.metadata = metadata or {
+#             "created": str(datetime.now()),
+#             "updated": str(datetime.now()),
+#         }
+#         self.embedding: Optional[np.ndarray] = embedding
 
-    def __str__(self) -> str:
-        embedding_shape = self.embedding.shape if self.embedding is not None else None
-        return f"MemoryUnit(uid='{self.uid}', raw_data={self.raw_data}, metadata={self.metadata}, embedding_shape={embedding_shape})"
+#     def __str__(self) -> str:
+#         embedding_shape = self.embedding.shape if self.embedding is not None else None
+#         return f"MemoryUnit(uid='{self.uid}', raw_data={self.raw_data}, metadata={self.metadata}, embedding_shape={embedding_shape})"
 
-    def __repr__(self) -> str:
-        return f"MemoryUnit({self.uid})"
+#     def __repr__(self) -> str:
+#         return f"MemoryUnit({self.uid})"
 
-    def __eq__(self, value):
-        if not isinstance(value, MemoryUnit):
-            return False
-        return (
-            self.uid == value.uid
-            and self.raw_data == value.raw_data
-            and self.metadata == value.metadata
-            # and np.array_equal(self.embedding,value.embedding)
-        )
+#     def __eq__(self, value):
+#         if not isinstance(value, MemoryUnit):
+#             return False
+#         return (
+#             self.uid == value.uid
+#             and self.raw_data == value.raw_data
+#             and self.metadata == value.metadata
+#             # and np.array_equal(self.embedding,value.embedding)
+#         )
 
-    def __hash__(self):
-        return hash(self.uid)
+#     def __hash__(self):
+#         return hash(self.uid)
 
 class MemorySpace:
     """
@@ -200,6 +203,14 @@ class SemanticMap:
         # 为简单起见，我们将维护一个从 MemoryUnit.id 到一个内部 faiss_id (int64) 的映射。
         self._uid_to_internal_faiss_id: Dict[str, int] = {}
         self._internal_faiss_id_counter: int = 0 # 用于生成唯一的内部 FAISS ID
+
+        # 添加以下跟踪变量
+        self._modified_units = set()  # 被修改的单元ID集合
+        self._deleted_units = set()   # 已删除但尚未同步到磁盘的单元ID
+        self._last_sync_time = None   # 上次与外部存储同步的时间
+        self._external_storage:MilvusOperator = None # 指向外部存储的连接（Milvus）
+        self._max_memory_units = 10000 # 内存中最大单元数，超过则触发换页
+        self._access_counts = {}      # 记录每个单元的访问次数，用于LRU策略
 
         try:
             self.text_model = SentenceTransformer(text_embedding_model_name)
@@ -311,12 +322,253 @@ class SemanticMap:
             return None
         return embedding
 
+    def connect_external_storage(self, 
+                                storage_type: str = "milvus",
+                                host: str = "localhost", 
+                                port: str = "19530",
+                                user: str = "", 
+                                password: str = "",
+                                collection_name: str = "hippo_memory_units"):
+        """
+        连接到外部存储系统
+        参数:
+            storage_type: 存储类型，当前支持 "milvus"
+            其他参数: 特定存储系统的连接参数
+        """
+        if storage_type.lower() == "milvus":
+            try:
+                self._external_storage = MilvusOperator(
+                    host=host, 
+                    port=port,
+                    user=user, 
+                    password=password,
+                    collection_name=collection_name,
+                    embedding_dim=self.embedding_dim
+                )
+                if self._external_storage.is_connected:
+                    logging.info(f"已连接到外部存储: Milvus ({host}:{port})")
+                    return True
+                else:
+                    self._external_storage = None
+                    logging.error("连接到Milvus失败")
+                    return False
+            except Exception as e:
+                logging.error(f"初始化外部存储连接失败: {e}")
+                return False
+        else:
+            logging.error(f"不支持的存储类型: {storage_type}")
+            return False
+
+    def _record_unit_access(self, uid: str):
+        """记录单元被访问，更新访问计数"""
+        if uid in self.memory_units:
+            self._access_counts[uid] = self._access_counts.get(uid, 0) + 1
+
+    def _sync_unit_to_external(self, uid: str) -> bool:
+        """将单元同步到外部存储(Milvus)"""
+        if not self._external_storage:
+            return False
+            
+        unit = self.memory_units.get(uid)
+        if not unit:
+            logging.warning(f"无法同步不存在的单元 '{uid}'")
+            return False
+            
+        try:
+            # 找出单元所属的所有空间
+            space_names = []
+            for space_name, space in self.memory_spaces.items():
+                if uid in space.get_memory_uids():
+                    space_names.append(space_name)
+            
+            # 使用MilvusOperator添加/更新单元
+            success = self._external_storage.add_unit(unit, space_names)
+            if success:
+                logging.debug(f"单元 '{uid}' 已同步到外部存储")
+                return True
+            else:
+                logging.error(f"同步单元 '{uid}' 到外部存储失败")
+                return False
+        except Exception as e:
+            logging.error(f"同步单元 '{uid}' 到外部存储时出错: {e}")
+            return False
+
+    def sync_to_external(self, force_full_sync: bool = False):
+        """
+        将修改过的单元同步到外部存储
+        参数:
+            force_full_sync: 如果为True，则同步所有单元，而不仅是修改过的单元
+        返回:
+            (success_count, fail_count): 成功和失败的单元数量
+        """
+        if not self._external_storage:
+            logging.error("未连接到外部存储，无法同步")
+            return 0, 0
+            
+        success_count = 0
+        fail_count = 0
+        
+        # 处理修改过的单元
+        units_to_sync = list(self.memory_units.keys()) if force_full_sync else list(self._modified_units)
+        for uid in units_to_sync:
+            if uid in self.memory_units:  # 确保单元仍然存在
+                if self._sync_unit_to_external(uid):
+                    success_count += 1
+                    if uid in self._modified_units:
+                        self._modified_units.remove(uid)
+                else:
+                    fail_count += 1
+        
+        # 处理删除的单元
+        deleted_uids = list(self._deleted_units)
+        for uid in deleted_uids:
+            try:
+                if self._external_storage.delete_unit(uid):
+                    self._deleted_units.remove(uid)
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                logging.error(f"从外部存储删除单元 '{uid}' 失败: {e}")
+                fail_count += 1
+        
+        self._last_sync_time = datetime.now()
+        logging.info(f"与外部存储同步完成。成功: {success_count}, 失败: {fail_count}")
+        return success_count, fail_count
+
+    def load_from_external(self, 
+                     filter_space: Optional[str] = None,
+                     limit: int = 1000,
+                     replace_existing: bool = False):
+        """
+        从外部存储加载单元到内存
+        参数:
+            filter_space: 如果提供，则只加载指定空间中的单元
+            limit: 最大加载数量，避免内存溢出
+            replace_existing: 是否替换内存中已有的单元
+        返回:
+            加载的单元数量
+        """
+        if not self._external_storage:
+            logging.error("未连接到外部存储，无法加载")
+            return 0
+        
+        try:
+            # 根据空间过滤加载单元
+            if filter_space:
+                units = self._external_storage.get_units_by_space(filter_space)
+            else:
+                # 获取所有单元ID，然后批量加载
+                # 假设外部存储提供了获取所有单元ID的方法
+                all_unit_ids = self._external_storage.get_all_unit_ids(limit=limit)
+                units = self._external_storage.get_units_batch(all_unit_ids)
+            
+            load_count = 0
+            # 将加载的单元添加到内存中
+            for unit in units:
+                if unit.uid not in self.memory_units or replace_existing:
+                    self.memory_units[unit.uid] = unit
+                    self._access_counts[unit.uid] = 0  # 初始化访问计数
+                    load_count += 1
+                    
+                    # 处理单元的空间归属
+                    if hasattr(unit, 'metadata') and isinstance(unit.metadata, dict):
+                        spaces = unit.metadata.get('spaces', [])
+                        for space_name in spaces:
+                            self.add_unit_to_space(unit.uid, space_name)
+            
+            # 如果加载了单元，可能需要重建索引
+            if load_count > 0:
+                logging.info(f"从外部存储加载了 {load_count} 个单元")
+                
+                # 检查是否需要换页以维持内存限制
+                if len(self.memory_units) > self._max_memory_units:
+                    units_to_page_out = len(self.memory_units) - self._max_memory_units
+                    self._page_out_least_used_units(count=units_to_page_out)
+                    
+                # 重建FAISS索引
+                self.build_index()
+                
+            return load_count
+            
+        except Exception as e:
+            logging.error(f"从外部存储加载单元失败: {e}")
+            return 0
+
+    def _page_out_least_used_units(self, count: int = 100):
+        """
+        将最少使用的单元从内存移出到外部存储
+        参数:
+            count: 要移出的单元数量
+        """
+        if not self._external_storage:
+            logging.warning("没有配置外部存储，无法执行换页操作")
+            return
+            
+        # 按访问次数排序，找出最少使用的单元
+        sorted_units = sorted(
+            [(uid, count) for uid, count in self._access_counts.items()],
+            key=lambda x: x[1]
+        )
+        
+        units_to_page_out = sorted_units[:count]
+        
+        # 确保修改过的单元先同步到外部存储
+        for uid, _ in units_to_page_out:
+            if uid in self._modified_units:
+                self._sync_unit_to_external(uid)
+                self._modified_units.remove(uid)
+            
+            # 从内存中移除
+            if uid in self.memory_units:
+                unit = self.memory_units.pop(uid)
+                logging.debug(f"单元 '{uid}' 已从内存页出")
+                
+        # 更新访问计数
+        for uid, _ in units_to_page_out:
+            if uid in self._access_counts:
+                del self._access_counts[uid]
+
+    def _load_unit_from_external(self, uid: str) -> Optional[MemoryUnit]:
+        """从外部存储(Milvus)加载单元到内存"""
+        if not self._external_storage:
+            return None
+            
+        try:
+            # 使用MilvusOperator加载单元
+            unit = self._external_storage.get_unit(uid)
+            if unit:
+                logging.debug(f"单元 '{uid}' 已从外部存储加载到内存")
+                return unit
+        except Exception as e:
+            logging.error(f"从外部存储加载单元 '{uid}' 失败: {e}")
+        
+        return None
+                
+    def get_unit(self, uid: str) -> Optional[MemoryUnit]:
+        """增强get_unit方法，记录访问并支持从外部存储加载"""
+        unit = self.memory_units.get(uid)
+        if unit:
+            # 如果内存中有，记录访问并返回
+            self._record_unit_access(uid)
+            return unit
+        # TODO: 实现从外部存储加载单元
+        # elif self._external_storage:
+        #     # 如果内存中没有但有外部存储，尝试加载
+        #     unit = self._load_unit_from_external(uid)
+        #     if unit:
+        #         self.memory_units[uid] = unit
+        #         self._record_unit_access(uid)
+        #         return unit
+        return None
+
     def add_unit(self,
-                        unit: MemoryUnit,
-                        explicit_content_for_embedding: Optional[Any] = None,
-                        content_type_for_embedding: Optional[str] = None, # "text" or "image_path"
-                        space_names: Optional[List[str]] = None,
-                        rebuild_index_immediately: bool = False):
+                unit: MemoryUnit,
+                explicit_content_for_embedding: Optional[Any] = None,
+                content_type_for_embedding: Optional[str] = None, # "text" or "image_path"
+                space_names: Optional[List[str]] = None,
+                rebuild_index_immediately: bool = False
+            ):
         """
         向语义地图添加一个新的内存单元。
         如果单元已存在，则其值和嵌入将被更新。
@@ -330,6 +582,11 @@ class SemanticMap:
         if not isinstance(unit, MemoryUnit):
             logging.error("尝试添加的不是 MemoryUnit 对象。")
             return
+        
+        if explicit_content_for_embedding is None:
+            logging.warning(f"未提供显式内容用于嵌入，尝试从单元 '{unit.uid}' 的值中推断。默认为raw_data的str表示")
+            explicit_content_for_embedding = unit.raw_data
+            content_type_for_embedding = "text" # 默认类型为文本
 
         # 生成或更新嵌入
         new_embedding = self._generate_embedding_for_unit(unit, explicit_content_for_embedding, content_type_for_embedding)
@@ -351,6 +608,15 @@ class SemanticMap:
         
         if rebuild_index_immediately:
             self.build_index() # 立即重建索引 (可能效率不高，除非是单个添加)
+
+        # 添加到修改跟踪
+        self._modified_units.add(unit.uid)
+        self._access_counts[unit.uid] = 1
+        
+        # 检查内存限制，必要时触发换页
+        # TODO: 实现换页逻辑
+        # if len(self.memory_units) > self._max_memory_units:
+        #     self._page_out_least_used_units()
 
     def get_unit(self, uid: str) -> Optional[MemoryUnit]:
         """通过ID检索内存单元。"""
@@ -387,6 +653,13 @@ class SemanticMap:
                 self.build_index()
         else:
             logging.warning(f"尝试删除不存在的内存单元ID '{uid}'。")
+
+        # 添加到删除跟踪
+        self._deleted_units.add(uid)
+        if uid in self._modified_units:
+            self._modified_units.remove(uid)
+        if uid in self._access_counts:
+            del self._access_counts[uid]
 
     def build_index(self):
         """
@@ -711,12 +984,12 @@ class SemanticMap:
         返回:
             导出是否成功
         """
-        try:
-            # 延迟导入，避免强制依赖
-            from milvus_operator import MilvusOperator
-        except ImportError:
-            logging.error("未找到milvus_operator模块，请确保已安装pymilvus并创建了milvus_operator.py")
-            return False
+        # try:
+        #     # 延迟导入，避免强制依赖
+        #     from milvus_operator import MilvusOperator
+        # except ImportError:
+        #     logging.error("未找到milvus_operator模块，请确保已安装pymilvus并创建了milvus_operator.py")
+        #     return False
         
         try:
             # 创建Milvus操作类
@@ -780,13 +1053,428 @@ class SemanticGraph:
         self.semantic_map: SemanticMap = semantic_map_instance if semantic_map_instance else SemanticMap()
         self.nx_graph: nx.DiGraph = nx.DiGraph() # 使用 NetworkX有向图存储节点和显式关系
         logging.info("SemanticGraph 已初始化。")
+        # 添加Neo4j连接跟踪
+        self._neo4j_connection:Neo4jOperator = None  # 指向Neo4j的连接
+        self._modified_relationships = set()  # 修改过的关系 (source_id, target_id, rel_type)
+        self._deleted_relationships = set()   # 删除的关系
+        self._modified_units = set()  # 修改过的内存单元
+        self._deleted_units = set() # 删除的内存单元
+        self._max_nodes_in_memory = 10000  # 内存中最大节点数
+        self._nodes_access_counts = {}     # 节点访问计数，用于LRU算法
+        self._nodes_last_accessed = {}     # 节点最后访问时间，用于LRU算法
+        self._nodes_dirty_flag = set()     # 标记内存中已修改但尚未同步的节点
+        # 关系内存管理
+        self._max_relationships_in_memory = 100000  # 内存中最大关系数
+        self._relationship_cache = {}  # 缓存关系属性 {(source_id, target_id, rel_type): properties}
+        self._relationships_access_counts = {}  # 关系访问计数
+        self._relationships_last_accessed = {}  # 关系最后访问时间
+
+    def page_out_nodes(self, count: int = 100, strategy: str = "LRU") -> int:
+        """
+        将不常用节点从内存移出
+        
+        参数:
+            count: 要移出的节点数量
+            strategy: 换出策略，"LRU"(最近最少使用)或"LFU"(最不常使用)
+        
+        返回:
+            实际移出的节点数量
+        """
+        if not hasattr(self.semantic_map, '_external_storage') or not self.semantic_map._external_storage:
+            logging.warning("未连接外部存储，无法执行节点换出")
+            return 0
+            
+        if len(self.semantic_map.memory_units) <= self._max_nodes_in_memory:
+            logging.debug("当前节点数量未超过最大限制，无需换出")
+            return 0
+        
+        # 确定要换出的节点
+        candidates = list(self.semantic_map.memory_units.keys())
+        if strategy == "LRU":
+            # 按最后访问时间排序
+            candidates.sort(key=lambda uid: self._nodes_last_accessed.get(uid, 0))
+        elif strategy == "LFU":
+            # 按访问频率排序
+            candidates.sort(key=lambda uid: self._nodes_access_counts.get(uid, 0))
+        else:
+            logging.warning(f"不支持的换出策略: {strategy}，使用LRU")
+            candidates.sort(key=lambda uid: self._nodes_last_accessed.get(uid, 0))
+        
+        # 限制换出数量
+        nodes_to_page_out = candidates[:min(count, len(candidates))]
+        
+        # 同步已修改的节点到外部存储
+        synced_count = 0
+        for uid in nodes_to_page_out:
+            if uid in self._nodes_dirty_flag:
+                unit = self.semantic_map.memory_units.get(uid)
+                if unit:
+                    # 同步到Milvus
+                    space_names = []
+                    for space_name, space in self.semantic_map.memory_spaces.items():
+                        if uid in space.get_memory_uids():
+                            space_names.append(space_name)
+                    
+                    success = self.semantic_map._external_storage.add_unit(unit, space_names)
+                    if success:
+                        self._nodes_dirty_flag.remove(uid)
+                        synced_count += 1
+                        logging.debug(f"节点 '{uid}' 已同步到外部存储")
+        
+        # 从内存中移除这些节点(但保留在图结构中)
+        for uid in nodes_to_page_out:
+            if uid in self.semantic_map.memory_units:
+                del self.semantic_map.memory_units[uid]
+                if uid in self._nodes_access_counts:
+                    del self._nodes_access_counts[uid]
+                if uid in self._nodes_last_accessed:
+                    del self._nodes_last_accessed[uid]
+                logging.debug(f"节点 '{uid}' 已从内存中移出")
+        
+        logging.info(f"已将 {len(nodes_to_page_out)} 个节点从内存移出，其中 {synced_count} 个节点已同步到外部存储")
+        return len(nodes_to_page_out)
+
+    def page_in_nodes(self, node_ids: List[str]) -> int:
+        """
+        从外部存储加载节点到内存
+        
+        参数:
+            node_ids: 要加载的节点ID列表
+        
+        返回:
+            成功加载的节点数量
+        """
+        if not hasattr(self.semantic_map, '_external_storage') or not self.semantic_map._external_storage:
+            logging.warning("未连接外部存储，无法从外部加载节点")
+            return 0
+        
+        # 过滤已在内存中的节点
+        ids_to_load = [uid for uid in node_ids if uid not in self.semantic_map.memory_units]
+        if not ids_to_load:
+            return 0
+        
+        # 从Milvus加载节点
+        loaded_units = self.semantic_map._external_storage.get_units_batch(ids_to_load)
+        
+        # 添加到内存
+        for unit in loaded_units:
+            self.semantic_map.memory_units[unit.uid] = unit
+            self._nodes_access_counts[unit.uid] = 1
+            self._nodes_last_accessed[unit.uid] = datetime.now().timestamp()
+            
+            # 如果有向量，可能需要更新FAISS索引
+            if unit.embedding is not None:
+                # 选择一种方式更新索引
+                # 方式1: 单独添加向量到已有索引(如果FAISS索引支持增量更新)
+                if self.semantic_map.faiss_index and hasattr(self.semantic_map.faiss_index, 'add_with_ids'):
+                    try:
+                        internal_id = self.semantic_map._internal_faiss_id_counter
+                        self.semantic_map._internal_faiss_id_counter += 1
+                        self.semantic_map._uid_to_internal_faiss_id[unit.uid] = internal_id
+                        
+                        vector = unit.embedding.reshape(1, -1).astype(np.float32)
+                        ids = np.array([internal_id], dtype=np.int64)
+                        self.semantic_map.faiss_index.add_with_ids(vector, ids)
+                    except Exception as e:
+                        logging.error(f"向FAISS索引添加向量失败: {e}")
+                
+                # 方式2: 标记为需要重建索引，但不立即重建
+                # 可以设置一个标志，在一定数量的更改后触发重建
+        
+        logging.info(f"已从外部存储加载 {len(loaded_units)} 个节点到内存")
+        
+        # 如果加载后内存节点数超过限制，触发节点换出
+        if len(self.semantic_map.memory_units) > self._max_nodes_in_memory:
+            nodes_to_page_out = len(self.semantic_map.memory_units) - self._max_nodes_in_memory
+            self.page_out_nodes(count=nodes_to_page_out)
+        
+        return len(loaded_units)
+
+    def _cache_relationship(self, source_uid: str, target_uid: str, relationship_type: str, properties: dict):
+        """将关系缓存到内存"""
+        rel_key = (source_uid, target_uid, relationship_type)
+        self._relationship_cache[rel_key] = properties
+        self._relationships_access_counts[rel_key] = 1
+        self._relationships_last_accessed[rel_key] = datetime.now().timestamp()
+        
+        # 检查缓存大小，必要时清理
+        if len(self._relationship_cache) > self._max_relationships_in_memory:
+            self._clear_relationship_cache(int(self._max_relationships_in_memory * 0.2))  # 清理20%的关系缓存
+
+    def _clear_relationship_cache(self, count: int = 100):
+        """清理关系缓存"""
+        if not self._relationship_cache:
+            return
+            
+        # 按最后访问时间排序
+        sorted_rels = sorted(
+            self._relationship_cache.keys(),
+            key=lambda k: self._relationships_last_accessed.get(k, 0)
+        )
+        
+        # 移除最旧的关系
+        for rel_key in sorted_rels[:count]:
+            if rel_key in self._relationship_cache:
+                del self._relationship_cache[rel_key]
+            if rel_key in self._relationships_access_counts:
+                del self._relationships_access_counts[rel_key]
+            if rel_key in self._relationships_last_accessed:
+                del self._relationships_last_accessed[rel_key]
+        
+        logging.debug(f"已清理 {count} 个关系缓存")
+
+    def add_relationship(self, source_uid: str, target_uid: str, relationship_name: str, 
+                        bidirectional: bool = False, **kwargs):
+        """添加关系并跟踪修改"""
+        # 添加到NetworkX图
+        edge_attributes = {"type": relationship_name, **kwargs}
+        self.nx_graph.add_edge(source_uid, target_uid, **edge_attributes)
+        
+        # 缓存关系属性
+        self._cache_relationship(source_uid, target_uid, relationship_name, kwargs)
+        
+        # 记录修改
+        self._modified_relationships.add((source_uid, target_uid, relationship_name))
+        
+        # 如果是双向关系
+        if bidirectional:
+            self.nx_graph.add_edge(target_uid, source_uid, **edge_attributes)
+            self._cache_relationship(target_uid, source_uid, relationship_name, kwargs)
+            self._modified_relationships.add((target_uid, source_uid, relationship_name))
+            
+        logging.info(f"已添加从 '{source_uid}' 到 '{target_uid}' 的关系 '{relationship_name}'")
+        return True
+
+    def get_relationship(self, source_uid: str, target_uid: str, relationship_name: Optional[str] = None) -> Dict:
+        """获取关系属性，必要时从Neo4j加载"""
+        # 先检查内存中是否有此关系
+        if relationship_name:
+            rel_key = (source_uid, target_uid, relationship_name)
+            if rel_key in self._relationship_cache:
+                # 更新访问统计
+                self._relationships_access_counts[rel_key] = self._relationships_access_counts.get(rel_key, 0) + 1
+                self._relationships_last_accessed[rel_key] = datetime.now().timestamp()
+                return self._relationship_cache[rel_key]
+            
+            # 从NetworkX获取
+            if self.nx_graph.has_edge(source_uid, target_uid):
+                edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
+                if edge_data and edge_data.get("type") == relationship_name:
+                    # 缓存并返回
+                    properties = {k: v for k, v in edge_data.items() if k != "type"}
+                    self._cache_relationship(source_uid, target_uid, relationship_name, properties)
+                    return properties
+        else:
+            # 获取所有类型的关系
+            if self.nx_graph.has_edge(source_uid, target_uid):
+                return self.nx_graph.get_edge_data(source_uid, target_uid)
+        
+        # 内存中没有，尝试从Neo4j加载
+        if self._neo4j_connection:
+            try:
+                # 假设Neo4jOperator有get_relationship方法
+                properties = self._neo4j_connection.get_relationship_properties(
+                    source_uid, target_uid, relationship_name
+                )
+                if properties:
+                    # 添加到NetworkX和缓存
+                    if relationship_name:
+                        self.nx_graph.add_edge(source_uid, target_uid, type=relationship_name, **properties)
+                        self._cache_relationship(source_uid, target_uid, relationship_name, properties)
+                    return properties
+            except Exception as e:
+                logging.error(f"从Neo4j加载关系失败: {e}")
+        
+        return {}  # 关系不存在
+
+    def sync_to_external(self, force_full_sync: bool = False) -> Dict[str, int]:
+        """
+        将修改同步到外部存储(Neo4j和Milvus)
+        
+        参数:
+            force_full_sync: 是否强制全量同步
+            
+        返回:
+            同步统计信息
+        """
+        stats = {
+            "nodes_synced": 0,
+            "nodes_failed": 0,
+            "relationships_synced": 0,
+            "relationships_failed": 0
+        }
+        
+        # 1. 同步节点到Milvus
+        if hasattr(self.semantic_map, '_external_storage') and self.semantic_map._external_storage:
+            # 确定要同步的节点
+            nodes_to_sync = list(self.semantic_map.memory_units.keys()) if force_full_sync else list(self._nodes_dirty_flag)
+            
+            for uid in nodes_to_sync:
+                unit = self.semantic_map.memory_units.get(uid)
+                if not unit:
+                    continue
+                
+                # 获取节点所属空间
+                space_names = []
+                for space_name, space in self.semantic_map.memory_spaces.items():
+                    if uid in space.get_memory_uids():
+                        space_names.append(space_name)
+                
+                # 同步到Milvus
+                if self.semantic_map._external_storage.add_unit(unit, space_names):
+                    stats["nodes_synced"] += 1
+                    if uid in self._nodes_dirty_flag:
+                        self._nodes_dirty_flag.remove(uid)
+                else:
+                    stats["nodes_failed"] += 1
+            
+            # 处理已删除的节点
+            for uid in self.semantic_map._deleted_units:
+                if self.semantic_map._external_storage.delete_unit(uid):
+                    stats["nodes_synced"] += 1
+                else:
+                    stats["nodes_failed"] += 1
+        
+        # 2. 同步关系到Neo4j
+        if self._neo4j_connection:
+            # 处理修改的关系
+            for source_uid, target_uid, rel_type in self._modified_relationships:
+                # 获取关系属性
+                edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
+                if not edge_data:
+                    continue
+                
+                properties = {k: v for k, v in edge_data.items() if k != "type"}
+                
+                # 同步到Neo4j
+                if self._neo4j_connection.add_relationship(source_uid, target_uid, rel_type, properties):
+                    stats["relationships_synced"] += 1
+                    if (source_uid, target_uid, rel_type) in self._modified_relationships:
+                        self._modified_relationships.remove((source_uid, target_uid, rel_type))
+                else:
+                    stats["relationships_failed"] += 1
+            
+            # 处理删除的关系
+            for source_uid, target_uid, rel_type in self._deleted_relationships:
+                if self._neo4j_connection.delete_relationship(source_uid, target_uid, rel_type):
+                    stats["relationships_synced"] += 1
+                    if (source_uid, target_uid, rel_type) in self._deleted_relationships:
+                        self._deleted_relationships.remove((source_uid, target_uid, rel_type))
+                else:
+                    stats["relationships_failed"] += 1
+        
+        logging.info(f"同步完成。节点: 成功={stats['nodes_synced']}, 失败={stats['nodes_failed']}; "
+                    f"关系: 成功={stats['relationships_synced']}, 失败={stats['relationships_failed']}")
+        
+        return stats
+
+    def full_export(self) -> Dict[str, int]:
+        """完整导出所有节点和关系到外部存储"""
+        logging.info("开始全量导出...")
+        
+        # 获取所有还未加载到内存的节点ID
+        if self._neo4j_connection:
+            try:
+                # 获取Neo4j中的所有节点ID
+                all_node_ids = self._neo4j_connection.get_all_node_ids()
+                
+                # 过滤出不在内存中的节点
+                missing_ids = [uid for uid in all_node_ids if uid not in self.semantic_map.memory_units]
+                
+                # 分批加载这些节点
+                batch_size = 100
+                for i in range(0, len(missing_ids), batch_size):
+                    batch_ids = missing_ids[i:i+batch_size]
+                    self.page_in_nodes(batch_ids)
+            except Exception as e:
+                logging.error(f"获取所有节点ID失败: {e}")
+        
+        # 强制全量同步
+        return self.sync_to_external(force_full_sync=True)
+
+    def incremental_export(self) -> Dict[str, int]:
+        """增量导出修改过的节点和关系到外部存储"""
+        return self.sync_to_external(force_full_sync=False)
+
+    def get_unit(self, uid: str) -> Optional[MemoryUnit]:
+        """智能获取节点，当节点不在内存时从外部存储加载"""
+        # 先检查是否在内存中
+        unit = self.semantic_map.get_unit(uid)
+        if unit:
+            # 更新访问统计
+            self._nodes_access_counts[uid] = self._nodes_access_counts.get(uid, 0) + 1
+            self._nodes_last_accessed[uid] = datetime.now().timestamp()
+            return unit
+        
+        # 不在内存中，尝试从外部存储加载
+        self.page_in_nodes([uid])
+        unit = self.semantic_map.get_unit(uid)
+        
+        if unit:
+            return unit
+        else:
+            logging.warning(f"节点 '{uid}' 在内存和外部存储中均不存在")
+            return None
+
+    def connect_to_neo4j(self,
+                    uri: str = "bolt://localhost:7687", 
+                    user: str = "neo4j", 
+                    password: str = "password",
+                    database: str = "neo4j"):
+        """
+        连接到Neo4j数据库
+        """
+        try:
+            self._neo4j_connection = Neo4jOperator(
+                neo4j_uri=uri,
+                neo4j_user=user,
+                neo4j_password=password,
+                neo4j_database=database
+            )
+            
+            if self._neo4j_connection.neo4j_connected:
+                logging.info(f"已连接到Neo4j: {uri}")
+                # 同时连接SemanticMap到Milvus
+                self.semantic_map.connect_external_storage(
+                    storage_type="milvus",
+                    host="localhost",  # 可以参数化这些默认值
+                    port="19530"
+                )
+                return True
+            else:
+                self._neo4j_connection = None
+                logging.error("连接到Neo4j失败")
+                return False
+        except Exception as e:
+            logging.error(f"初始化Neo4j连接失败: {e}")
+            return False
+
+    def add_relationship(self, source_uid: str, target_uid: str, relationship_name: str, bidirectional: bool = False, **kwargs):
+        # 现有代码
+        
+        # 添加到修改跟踪
+        self._modified_relationships.add((source_uid, target_uid, relationship_name))
+        if bidirectional:
+            self._modified_relationships.add((target_uid, source_uid, relationship_name))
+
+    def delete_relationship(self, source_uid: str, target_uid: str, relationship_name: Optional[str] = None):
+        # 现有代码
+        
+        # 添加到删除跟踪
+        if relationship_name:
+            self._deleted_relationships.add((source_uid, target_uid, relationship_name))
+        else:
+            # 如果没有指定关系名称，则添加所有相关关系到删除跟踪
+            for _, _, data in self.nx_graph.edges([source_uid, target_uid], data=True):
+                rel_type = data.get("type", "RELATED_TO")
+                self._deleted_relationships.add((source_uid, target_uid, rel_type))
 
     def add_unit(self,
-                        unit: MemoryUnit,
-                        explicit_content_for_embedding: Optional[Any] = None,
-                        content_type_for_embedding: Optional[str] = None,
-                        space_names: Optional[List[str]] = None,
-                        rebuild_semantic_map_index_immediately: bool = False):
+                unit: MemoryUnit,
+                explicit_content_for_embedding: Optional[Any] = None,
+                content_type_for_embedding: Optional[str] = None,
+                space_names: Optional[List[str]] = None,
+                rebuild_semantic_map_index_immediately: bool = False):
         """
         向图谱添加一个内存单元 (节点)。
         单元也会被添加到内部的 SemanticMap 中。
@@ -1147,12 +1835,12 @@ class SemanticGraph:
         database: str = "neo4j"
         ) -> bool:
         """将SemanticGraph中的节点和关系导出到Neo4j数据库"""
-        try:
-            # 延迟导入，避免强制依赖
-            from neo4j_operator import Neo4jOperator
-        except ImportError:
-            logging.error("未找到neo4j_operator模块，请确保已安装neo4j并创建了neo4j_operator.py")
-            return False
+        # try:
+        #     # 延迟导入，避免强制依赖
+        #     from neo4j_operator import Neo4jOperator
+        # except ImportError:
+        #     logging.error("未找到neo4j_operator模块，请确保已安装neo4j并创建了neo4j_operator.py")
+        #     return False
         
         try:
             # 创建Neo4j操作类 - 修改参数名以匹配Neo4jOperator的定义

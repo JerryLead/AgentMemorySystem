@@ -7,8 +7,8 @@ import json
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 from sentence_transformers import SentenceTransformer
-from dev.Hippo import MemoryUnit
-from milvus_operator import MilvusOperator
+from .memory_unit import MemoryUnit
+from .milvus_operator import MilvusOperator
 
 class Neo4jOperator:
     """增强版Neo4j操作类，集成Neo4j和Milvus，并维护本地FAISS索引"""
