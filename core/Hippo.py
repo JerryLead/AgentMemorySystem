@@ -9,6 +9,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 import networkx as nx
+from collections import Counter
 
 # 配置日志记录器
 logging.basicConfig(
@@ -28,7 +29,7 @@ class MemoryUnit:
         self,
         uid: str,
         raw_data: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]] = None,
         embedding: Optional[np.ndarray] = None,
     ):
         """
@@ -42,8 +43,6 @@ class MemoryUnit:
             raise ValueError("MemoryUnit uid cannot be empty")
         if not isinstance(raw_data, dict):
             raise ValueError("MemoryUnit raw_data must be a dict")
-        if not isinstance(metadata, dict):
-            raise ValueError(f"MemoryUnit metadata must be a dict")
 
         self.uid: str = uid
         self.raw_data: Dict[str, Any] = raw_data
@@ -51,6 +50,9 @@ class MemoryUnit:
             "created": datetime.now(),
             "updated": datetime.now(),
         }
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError(f"记忆单元Metadata必须是一个字典")
+
         self.embedding: Optional[np.ndarray] = embedding
 
     def __str__(self) -> str:
@@ -82,18 +84,18 @@ class MemorySpace:
     def __init__(
         self,
         ms_name: str,
-        embedding_dim: int = 512,
         index: faiss.Index = None,
     ):
         """
         初始化一个记忆空间。
         参数:
             ms_name (str): 记忆空间的名称，应唯一。
+            index (faiss.Index): 用户指定的Faiss索引类型。
         """
         if not isinstance(ms_name, str) or not ms_name.strip():
             raise ValueError("记忆空间名称不能为空")
         self.name: str = ms_name
-        self._units = Dict[str, MemoryUnit] = {}  # 存储记忆单元字典
+        self._units: Dict[str, MemoryUnit] = {}  # 存储记忆单元字典
 
         self._emb_index = index
         self.index_to_unit: Dict[int, MemoryUnit] = {}  # 额外维护索引到uid的映射
@@ -104,7 +106,6 @@ class MemorySpace:
     def __repr__(self):
         return f"MemorySpace({self.name})"
 
-    @property
     def add_unit(self, unit: MemoryUnit):
         """向此记忆空间添加一个记忆单元"""
         if not isinstance(unit, MemoryUnit):
@@ -115,12 +116,10 @@ class MemorySpace:
         self._units[unit.uid] = unit
         logging.debug(f"记忆单元 '{unit}' 已添加到记忆空间 '{self.name}'。")
 
-    @property
     def add_units(self, units: List[MemoryUnit]):
         for unit in units:
             self.add_unit(unit)
 
-    @property
     def remove_unit(self, uid: str):
         """从此记忆空间移除一个记忆单元的ID。"""
         if uid not in self._units:
@@ -129,12 +128,10 @@ class MemorySpace:
         del self._units[uid]
         logging.debug(f"记忆单元ID '{uid}' 已从记忆空间 '{self.name}' 移除。")
 
-    @property
     def remove_units(self, uids: List[str]):
         for uid in uids:
             self.remove_unit(uid)
 
-    @property
     def update_unit(self, unit: MemoryUnit):
         if unit.uid not in self._units:
             raise ValueError(f"MemoryUnit {unit.uid} not in MemorySpace {self.name}")
@@ -142,27 +139,23 @@ class MemorySpace:
         self._units[unit.uid] = unit
         logging.debug(f"记忆单元{unit}已更新到记忆空间{self.name}")
 
-    @property
     def update_units(self, units: List[MemoryUnit]):
         for unit in units:
             self.update_unit(unit)
 
-    @property
     def get_unit(self, uid: str):
         unit = self._units.get(uid, None)
         if not unit:
             raise ValueError(f"MemoryUnit {unit.uid} not in MemorySpace {self.name}")
         return unit
 
-    @property
     def get_units(self, uids: List[str]):
         units = [self.get_unit(uid) for uid in uids]
         return units
 
-    @property
     def get_all_units(self) -> List[MemoryUnit]:
         """获取此记忆空间中所有记忆单元的ID集合。"""
-        return list(self._units.values)
+        return list(self._units.values())
 
     def build_index(self):
         self._emb_index.reset()
@@ -172,7 +165,7 @@ class MemorySpace:
         embeddings = []
 
         for unit in self.get_all_units():
-            if unit.embedding:
+            if unit.embedding is not None:
                 embeddings.append(unit.embedding)
                 self.index_to_unit[count] = unit
                 count += 1
@@ -203,8 +196,7 @@ class SemanticMap:
         self,
         image_embedding_model_name: str = "clip-ViT-B-32",
         text_embedding_model_name: str = "sentence-transformers/clip-ViT-B-32-multilingual-v1",
-        embedding_dim: int = 512,
-        index: faiss.Index = faiss.IndexFlatL2,
+        index: Optional[faiss.Index] = None,
         update_interval: Optional[int] = 100,
     ):
         """
@@ -212,7 +204,6 @@ class SemanticMap:
         参数:
             image_embedding_model_name (str): 用于图像嵌入的 SentenceTransformer 模型名称。
             text_embedding_model_name (str): 用于文本嵌入的 SentenceTransformer 模型名称。
-            embedding_dim (int): 嵌入向量的维度。
             index (faiss.Index): 用户指定的Faiss索引类型。
             update_interval (int): 每隔多少次操作骤更新一次索引。
         """
@@ -221,12 +212,12 @@ class SemanticMap:
         )  # 存储 MemorySpace 对象，键为 ms_name
         self._reverse_index: Dict[str, List[str]] = {}  # uid -> namems_name 快速查找
 
-        if not isinstance(embedding_dim, int):
-            raise ValueError("embedding_dim must be an integer.")
-        if not isinstance(index, faiss.Index):
-            raise ValueError("index must be a faiss.Index.")
+        if index:
+            if not isinstance(index, faiss.Index):
+                raise ValueError("index must be a faiss.Index.")
+        else:
+            index = faiss.IndexFlatL2(512)
 
-        self.embedding_dim: int = embedding_dim
         self._emb_index = index  # 全局索引
         self._index_to_unit: Dict[int, MemoryUnit] = {}
 
@@ -240,16 +231,7 @@ class SemanticMap:
         except FileNotFoundError or ValueError as e:
             raise e
 
-        # 验证嵌入维度是否与模型输出匹配 (可选，但推荐)
-        test_text_emb = self.text_model.encode("test")
-        if test_text_emb.shape[0] != embedding_dim:
-            raise ValueError(
-                f"Output embedding dimension does not match specified embedding_dim. Expected: {embedding_dim}, Actual: {test_text_emb.shape[0]}."
-            )
-
-        logging.info(
-            f"SemanticMap 已初始化。嵌入维度: {self.embedding_dim}, FAISS索引类型: '{self.faiss_index_type}'。"
-        )
+        logging.info(f"SemanticMap 已初始化。索引类型：{self._emb_index}")
 
     def _get_text_embedding(self, text: str) -> np.ndarray:
         """为给定文本生成嵌入向量。"""
@@ -279,7 +261,6 @@ class SemanticMap:
             logging.error(f"生成图像嵌入失败: '{image_path}' - {e}")
             raise e
 
-    @property
     def add_unit(
         self,
         unit: MemoryUnit,
@@ -332,7 +313,6 @@ class SemanticMap:
                 self.build_index()
                 self._operation_counter = 0
 
-    @property
     def remove_unit(
         self,
         uid: str,
@@ -362,7 +342,6 @@ class SemanticMap:
                 self.build_index()
                 self._operation_counter = 0
 
-    @property
     def update_unit(self, unit: MemoryUnit):
         if unit.uid not in self._reverse_index:
             raise ValueError(f"MemoryUnit {unit.uid} does not exist.")
@@ -377,7 +356,6 @@ class SemanticMap:
                 self.build_index()
                 self._operation_counter = 0
 
-    @property
     def get_unit(self, uid: str) -> MemoryUnit:
         """通过ID检索记忆单元。"""
         if uid not in self._reverse_index:
@@ -398,9 +376,10 @@ class SemanticMap:
         for ms in self._memory_spaces.values():
             ms.build_index()
             for unit in ms.get_all_units():
-                embeddings.append(unit.embedding)
-                self._index_to_unit[count] = unit
-                count += 1
+                if unit.embedding is not None:
+                    embeddings.append(unit.embedding)
+                    self._index_to_unit[count] = unit
+                    count += 1
 
         should_train_index = [faiss.IndexIVFFlat, faiss.IndexIVFPQ]
 
@@ -414,7 +393,7 @@ class SemanticMap:
         query_vector: np.ndarray,
         top_k: int = 5,
         ms_name: Optional[str] = None,
-    ) -> List[Tuple[MemoryUnit, float]]:
+    ) -> List[MemoryUnit]:
         """
         通过查询向量在语义地图中搜索相似的记忆单元。
         参数:
@@ -427,9 +406,6 @@ class SemanticMap:
             List[Tuple[MemoryUnit, float]]: 一个元组列表，每个元组包含 (相似的MemoryUnit, 相似度得分/距离)。
                                             列表按相似度降序排列 (距离越小越相似)。
         """
-        if not query_vector or query_vector.shape != (self.embedding_dim,):
-            raise ValueError("Query vector is invalid.")
-
         index = self._emb_index
         index_map = self._index_to_unit
 
@@ -449,14 +425,15 @@ class SemanticMap:
 
         results = []
         D, I = index.search(query_vector_np, top_k)
+        print(f"Search result D: {D}, I: {I}")
         for i in range(len(I[0])):
+            print(f"i: {i}, I[0][i]: {I[0][i]}, int(I[0][i]) - 1: {int(I[0][i]) - 1}")
             if I[0][i] == -1:
                 continue
-            unit = index_map[I[0][i]]
+            unit = index_map[int(I[0][i]) - 1]
             if not unit.metadata:
                 unit.metadata = {}
-            unit.metadata["similarity_score"] = D[0][i]
-            results.append(unit)
+            results.append((unit, D[0][i]))
 
         return results
 
@@ -465,7 +442,7 @@ class SemanticMap:
         query_text: str,
         top_k: int = 5,
         ms_name: Optional[str] = None,
-    ) -> List[Tuple[MemoryUnit, float]]:
+    ) -> List[MemoryUnit]:
         """通过查询文本进行相似性搜索。"""
         query_vector = self._get_text_embedding(query_text)
         if query_vector is None:
@@ -485,18 +462,16 @@ class SemanticMap:
         return self.search_similarity_units_by_vector(query_vector, top_k, ms_name)
 
     # --- MemorySpace 管理方法 ---
-    @property
     def create_memory_space(self, ms_name: str):
         """创建一个记忆空间。"""
         if ms_name in self._memory_spaces:
             raise ValueError(f"MemorySpace {ms_name} already exists.")
 
         self._memory_spaces[ms_name] = MemorySpace(
-            ms_name=ms_name, embedding_dim=self.embedding_dim
+            ms_name=ms_name, index=self._emb_index
         )
         logging.info(f"记忆空间 '{ms_name}' 已创建。")
 
-    @property
     def remove_memory_space(self, ms_name: str):
         """删除一个记忆空间"""
         if ms_name not in self._memory_spaces:
@@ -506,11 +481,9 @@ class SemanticMap:
         logging.info(f"MemorySpace {ms_name} has been removed.")
         # TODO: 直接删除会不会导致内存泄漏？
 
-    @property
     def update_memory_space(self, ms_name: str):
         raise NotImplementedError
 
-    @property
     def get_memory_space(self, ms_name: str) -> MemorySpace:
         """通过名称获取记忆空间。"""
         if ms_name not in self._memory_spaces:
@@ -518,7 +491,6 @@ class SemanticMap:
 
         return self._memory_spaces[ms_name]
 
-    @property
     def get_all_memory_spaces(self) -> List[MemorySpace]:
         """获取所有记忆空间"""
         return list(self._memory_spaces.values())
@@ -667,7 +639,6 @@ class SemanticGraph:
         )  # 使用 NetworkX有向图存储节点和显式关系
         logging.info("SemanticGraph 已初始化。")
 
-    @property
     def add_unit(
         self,
         unit: MemoryUnit,
@@ -699,7 +670,6 @@ class SemanticGraph:
         )
         logging.debug(f"节点 '{unit.uid}' 已添加到 NetworkX 图。")
 
-    @property
     def remove_unit(self, uid: str, rebuild_index_immediately: bool = False):
         if self.nx_graph.has_node(uid):
             self.nx_graph.remove_node(uid)
@@ -709,7 +679,6 @@ class SemanticGraph:
 
         self.semantic_map.remove_unit(uid, rebuild_index_immediately)
 
-    @property
     def update_unit(self, unit: MemoryUnit):
         if self.nx_graph.has_node(unit.uid):
             self.nx_graph.update(unit.uid)  # TODO: 未查验
@@ -721,7 +690,6 @@ class SemanticGraph:
 
         self.semantic_map.update_unit(unit)
 
-    @property
     def get_unit(self, uid: str):
         if not self.nx_graph.has_node(uid):
             raise ValueError(f"MemoryUnit {uid} does not exist in NetworkX graph.")
@@ -1015,6 +983,93 @@ class SemanticGraph:
                 break
         return results
 
+    def filter_memory_units(
+        self,
+        filter_condition: Dict,
+        ms_names: List[str] = None,
+    ) -> List[MemoryUnit]:
+        """
+        根据过滤器条件和记忆空间名称列表筛选记忆单元。
+        :param filter_condition: 字典形式的过滤条件，key为字段名，value为过滤值。仅当raw_data中该字段值不等于过滤值时保留该单元。
+        :param ms_names: 可选，指定只从这些记忆空间中检索。
+        :return: 满足条件的MemoryUnit列表。
+        """
+        if not isinstance(filter_condition, dict):
+            raise ValueError("filter_condition 必须为字典类型")
+
+        # 获取候选单元
+        candidate_units = set()
+        if ms_names:
+            for ms_name in ms_names:
+                ms = self.semantic_map.get_memory_space(ms_name)
+                candidate_units.update(ms.get_all_units())
+        else:
+            # 所有空间的所有单元
+            for ms in self.semantic_map.get_all_memory_spaces():
+                candidate_units.update(ms.get_all_units())
+        # 过滤
+        filtered_units = []
+        for unit in candidate_units:
+            keep = True
+            for k, v in filter_condition.items():
+                if unit.raw_data.get(k) == v:
+                    keep = False
+                    break
+                if keep:
+                    filtered_units.append(unit)
+        return filtered_units
+
+    def aggregate_results(
+        self, memory_units: List[MemoryUnit]
+    ) -> Dict[MemoryUnit, int]:
+        counter = Counter(memory_units)
+        return dict(counter)
+
+    def path_search(
+        self,
+        start_uid: str,
+        end_uid: str,
+        max_depth: int = 3,
+        rel_type: Optional[str] = None,
+    ) -> List[List[str]]:
+        """
+        搜索起始节点和目标节点之间的所有路径（不超过最大深度），可选按关系类型过滤。
+        参数:
+            start_uid (str): 起始节点ID。
+            end_uid (str): 目标节点ID。
+            max_depth (int): 路径最大深度（包含起点和终点）。
+            rel_type (Optional[str]): 只考虑指定类型的关系（边）。
+        返回:
+            List[List[str]]: 所有满足条件的路径，每条路径为节点ID列表。
+        """
+        if not self.nx_graph.has_node(start_uid):
+            raise ValueError(f"起始节点 {start_uid} 不存在于图中。")
+        if not self.nx_graph.has_node(end_uid):
+            raise ValueError(f"目标节点 {end_uid} 不存在于图中。")
+        if max_depth < 1:
+            return []
+
+        def edge_type_filter(path):
+            if rel_type is None:
+                return True
+            for i in range(len(path) - 1):
+                edge_data = self.nx_graph.get_edge_data(path[i], path[i + 1])
+                if not edge_data or edge_data.get("type") != rel_type:
+                    return False
+            return True
+
+        # 使用networkx的所有简单路径生成器
+        all_paths = []
+        try:
+            for path in nx.all_simple_paths(
+                self.nx_graph, source=start_uid, target=end_uid, cutoff=max_depth
+            ):
+                if edge_type_filter(path):
+                    all_paths.append(path)
+        except nx.NetworkXNoPath:
+            return []
+        return all_paths
+
     # --- MemorySpace 相关 (通过 SemanticMap 操作) ---
     def create_memory_space(self, ms_name: str) -> MemorySpace:
         """在底层的 SemanticMap 中创建或获取一个记忆空间。"""
@@ -1143,7 +1198,10 @@ if __name__ == "__main__":
     # 如果模型维度不同，需要更复杂的处理或使用能输出相同维度的模型对
 
     # 为简单起见，假设使用默认模型和维度
-    semantic_map = SemanticMap(embedding_dim=512)
+    smap = SemanticMap()
+
+    for ms_name in ["AI文档", "通用知识", "AI概念", "AI观察", "NLP相关"]:
+        smap.create_memory_space(ms_name)
 
     # 2. 创建和添加 MemoryUnit
     unit1_text = "这是一个关于人工智能的文档。"
@@ -1189,47 +1247,43 @@ if __name__ == "__main__":
     #     semantic_map.add_memory_unit(unit_img1, ms_names=["图像空间"])
 
     # 添加文本单元到 map，并指定内容进行嵌入
-    semantic_map.add_unit(
-        unit1,
-        explicit_content_for_embedding=unit1_text,
-        content_type_for_embedding="text",
+    smap.add_unit(
+        unit=unit1,
         ms_names=["AI文档", "通用知识"],
     )
-    semantic_map.add_unit(
-        unit2,
-        explicit_content_for_embedding=unit2_text,
-        content_type_for_embedding="text",
+    smap.add_unit(
+        unit=unit2,
         ms_names=["AI概念"],
     )
-    semantic_map.add_unit(
+    smap.add_unit(
         unit3, ms_names=["AI观察", "NLP相关"]
     )  # 让map从unit.value推断嵌入内容
 
     # 3. 构建 SemanticMap 索引
-    semantic_map.build_index()
+    smap.build_index()
 
     # 4. 在 SemanticMap 中进行相似性搜索
     logging.info("\n--- SemanticMap 相似性搜索 (全局) ---")
     query1 = "什么是机器学习？"
-    similar_results_map = semantic_map.search_similarity_units_by_text(
+    similar_results_map = smap.search_similarity_units_by_text(
         query_text=query1, top_k=2
     )
     for res_unit, score in similar_results_map:
         logging.info(
-            f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}"
+            f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data}, 得分: {score:.4f}"
         )
 
     logging.info("\n--- SemanticMap 相似性搜索 (在 'AI文档' 空间) ---")
-    similar_results_map_space = semantic_map.search_similarity_units_by_text(
+    similar_results_map_space = smap.search_similarity_units_by_text(
         query_text="AI", top_k=1, ms_name="AI文档"
     )
-    for res_unit, score in similar_results_map_space:
+    for res_unit, score in similar_results_map:
         logging.info(
-            f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data.get('description', res_unit.uid)}, 得分: {score:.4f}"
+            f"找到单元: {res_unit.uid}, 值: {res_unit.raw_data}, 得分: {score:.4f}"
         )
 
     # 5. 创建 SemanticGraph (使用已有的 semantic_map)
-    semantic_graph = SemanticGraph(semantic_map=semantic_map)
+    semantic_graph = SemanticGraph(semantic_map=smap)
 
     # 6. 在 SemanticGraph 中添加单元 (它们已在map中，这里主要是为了在图中创建节点)
     # 通常，如果单元是新的，会通过 graph.add_memory_unit 添加
@@ -1244,7 +1298,7 @@ if __name__ == "__main__":
 
     # 7. 在 SemanticGraph 中添加关系
     semantic_graph.add_explicit_edge(
-        unit1.uid, unit2.uid, rel_type="包含主题", relevance=0.9
+        unit1.uid, unit2.uid, rel_type="包含主题", metadata={"relevance": 0.9}
     )
     semantic_graph.add_explicit_edge(
         unit2.uid, unit3.uid, rel_type="相关概念", bidirectional=True
