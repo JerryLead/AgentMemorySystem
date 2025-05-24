@@ -33,28 +33,41 @@ class Neo4jOperator:
     ):
         """
         初始化增强版Neo4j操作类
+        
+        参数:
+            neo4j_uri: Neo4j服务器URI
+            neo4j_user: Neo4j用户名
+            neo4j_password: Neo4j密码
+            neo4j_database: Neo4j数据库名称
+            milvus_host: Milvus服务器地址
+            milvus_port: Milvus服务器端口
+            milvus_user: Milvus用户名
+            milvus_password: Milvus密码
+            milvus_collection: Milvus集合名称
+            embedding_dim: 向量维度
+            use_local_faiss: 是否使用本地FAISS索引
+            faiss_index_type: FAISS索引类型
         """
         self.embedding_dim = embedding_dim
         self.use_local_faiss = use_local_faiss
         
         # 初始化Neo4j连接
-        self._neo4j_uri = neo4j_uri
-        self._neo4j_user = neo4j_user
-        self._neo4j_password = neo4j_password
-        self._database = neo4j_database  # 修复：使用_database属性名
+        self.neo4j_uri = neo4j_uri
+        self.neo4j_user = neo4j_user
+        self.neo4j_password = neo4j_password
+        self.neo4j_database = neo4j_database
         self.neo4j_connected = False
         
         try:
-            self._driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+            self.neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
             # 测试连接
-            with self._driver.session(database=neo4j_database) as session:
+            with self.neo4j_driver.session(database=neo4j_database) as session:
                 session.run("RETURN 1")
             self.neo4j_connected = True
             logging.info(f"成功连接到Neo4j服务器: {neo4j_uri}")
         except Exception as e:
             logging.error(f"连接到Neo4j服务器失败: {e}")
             self.neo4j_connected = False
-            self._driver = None
         
         # 初始化Milvus连接
         self.milvus_operator = MilvusOperator(
@@ -74,6 +87,22 @@ class Neo4jOperator:
         
         if use_local_faiss:
             self._init_faiss_index(faiss_index_type)
+    
+    # def _init_faiss_index(self, index_type: str = "Flat"):
+    #     """初始化FAISS索引"""
+    #     try:
+    #         if index_type == "Flat":
+    #             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+    #         elif index_type == "HNSW":
+    #             self.faiss_index = faiss.IndexHNSWFlat(self.embedding_dim, 32)
+    #         else:
+    #             # 默认使用Flat索引
+    #             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+            
+    #         logging.info(f"已初始化本地FAISS索引 (类型: {index_type})")
+    #     except Exception as e:
+    #         logging.error(f"初始化FAISS索引失败: {e}")
+    #         self.faiss_index = None
     
     def _init_faiss_index(self, index_type: str = "Flat"):
         """初始化FAISS索引"""
@@ -100,8 +129,12 @@ class Neo4jOperator:
     def ensure_node_exists(self, unit_id: str, type_labels: Optional[List[str]] = None) -> bool:
         """
         确保节点在Neo4j中存在（只存储ID，不存储具体数据）
+        
+        参数:
+            unit_id: 节点ID
+            type_labels: 节点的附加标签列表
         """
-        if not self.neo4j_connected or not self._driver:
+        if not self.neo4j_connected:
             logging.error("未连接到Neo4j服务器")
             return False
         
@@ -112,7 +145,7 @@ class Neo4jOperator:
             
             label_str = ":".join(labels)
             
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 query = f"MERGE (n:{label_str} {{uid: $id}}) RETURN n"
                 result = session.run(query, id=unit_id)
                 summary = result.consume()
@@ -131,38 +164,37 @@ class Neo4jOperator:
     def add_unit(self, unit: MemoryUnit, space_names: Optional[List[str]] = None, type_labels: Optional[List[str]] = None) -> bool:
         """
         添加MemoryUnit到Neo4j和Milvus
+        
+        参数:
+            unit: 要添加的MemoryUnit对象
+            space_names: 该单元所属的空间名称列表
+            type_labels: 节点在Neo4j中的附加标签
+            
+        返回:
+            添加是否成功
         """
         success_neo4j = self.ensure_node_exists(unit.uid, type_labels)
         success_milvus = self.milvus_operator.add_unit(unit, space_names)
         
         # 更新本地FAISS索引
+        # 在add_unit方法中的FAISS索引部分
         if success_milvus and self.use_local_faiss and self.faiss_index and unit.embedding is not None:
             try:
-                # 如果单元已存在，先删除旧的向量
-                if unit.uid in self.unit_id_to_faiss_id:
-                    old_faiss_id = self.unit_id_to_faiss_id[unit.uid]
-                    try:
-                        if hasattr(self.faiss_index, 'remove_ids'):
-                            self.faiss_index.remove_ids(np.array([old_faiss_id], dtype=np.int64))
-                        del self.faiss_id_to_unit_id[old_faiss_id]
-                        del self.unit_id_to_faiss_id[unit.uid]
-                    except:
-                        pass  # 忽略删除错误
-                
                 # 添加新向量
                 faiss_id = self.faiss_id_counter
                 self.faiss_id_counter += 1
                 
                 vector = unit.embedding.reshape(1, -1).astype(np.float32)
+                
+                # 直接使用add_with_ids，不需要检查是否有该方法
                 self.faiss_index.add_with_ids(vector, np.array([faiss_id], dtype=np.int64))
                 
                 self.faiss_id_to_unit_id[faiss_id] = unit.uid
                 self.unit_id_to_faiss_id[unit.uid] = faiss_id
                 
-                logging.debug(f"单元 '{unit.uid}' 已添加到本地FAISS索引")
+                logging.info(f"单元 '{unit.uid}' 已添加到本地FAISS索引")
             except Exception as e:
                 logging.error(f"添加单元 '{unit.uid}' 到本地FAISS索引失败: {e}")
-        return success_neo4j and success_milvus
     
     def add_relationship(
         self, 
@@ -173,8 +205,17 @@ class Neo4jOperator:
     ) -> bool:
         """
         在两个节点之间添加关系
+        
+        参数:
+            source_id: 源节点ID
+            target_id: 目标节点ID
+            relationship_type: 关系类型
+            properties: 关系属性
+        
+        返回:
+            添加是否成功
         """
-        if not self.neo4j_connected or not self._driver:
+        if not self.neo4j_connected:
             logging.error("未连接到Neo4j服务器")
             return False
         
@@ -192,7 +233,7 @@ class Neo4jOperator:
                     else:
                         props[k] = v
             
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 query = (
                     "MATCH (source:MemoryUnit {uid: $source_id}), "
                     "(target:MemoryUnit {uid: $target_id}) "
@@ -222,19 +263,25 @@ class Neo4jOperator:
     def delete_unit(self, unit_id: str) -> bool:
         """
         从Neo4j和Milvus中删除MemoryUnit
+        
+        参数:
+            unit_id: 要删除的单元ID
+            
+        返回:
+            删除是否成功
         """
         success_neo4j = True
         success_milvus = True
         
         # 从Neo4j删除
-        if self.neo4j_connected and self._driver:
+        if self.neo4j_connected:
             try:
-                with self._driver.session(database=self._database) as session:
-                    query = "MATCH (n:MemoryUnit {uid: $id}) DETACH DELETE n RETURN COUNT(n) as deleted"
+                with self.neo4j_driver.session(database=self.neo4j_database) as session:
+                    query = "MATCH (n:MemoryUnit {uid: $id}) DETACH DELETE n"
                     result = session.run(query, id=unit_id)
-                    deleted_count = result.single()["deleted"]
+                    summary = result.consume()
                     
-                    if deleted_count > 0:
+                    if summary.counters.nodes_deleted > 0:
                         logging.info(f"成功从Neo4j删除节点 '{unit_id}' 及其关系")
                     else:
                         logging.info(f"节点 '{unit_id}' 不存在于Neo4j中")
@@ -248,12 +295,14 @@ class Neo4jOperator:
         # 从本地FAISS索引删除
         if self.use_local_faiss and unit_id in self.unit_id_to_faiss_id:
             try:
-                faiss_id = self.unit_id_to_faiss_id[unit_id]
                 if hasattr(self.faiss_index, 'remove_ids'):
+                    faiss_id = self.unit_id_to_faiss_id[unit_id]
                     self.faiss_index.remove_ids(np.array([faiss_id], dtype=np.int64))
-                del self.faiss_id_to_unit_id[faiss_id]
-                del self.unit_id_to_faiss_id[unit_id]
-                logging.info(f"单元 '{unit_id}' 已从本地FAISS索引删除")
+                    del self.faiss_id_to_unit_id[faiss_id]
+                    del self.unit_id_to_faiss_id[unit_id]
+                    logging.info(f"单元 '{unit_id}' 已从本地FAISS索引删除")
+                else:
+                    logging.warning(f"当前FAISS索引不支持删除，单元 '{unit_id}' 将在下次重建索引时移除")
             except Exception as e:
                 logging.error(f"从本地FAISS索引删除单元 '{unit_id}' 失败: {e}")
         
@@ -267,27 +316,35 @@ class Neo4jOperator:
     ) -> List[str]:
         """
         获取与指定节点相关的节点ID列表
+        
+        参数:
+            unit_id: 起始节点ID
+            relationship_type: 关系类型，如果为None则获取所有类型的关系
+            direction: 关系方向，"outgoing"表示出边，"incoming"表示入边，"all"表示所有
+            
+        返回:
+            List[str]: 相关节点ID列表
         """
-        if not self.neo4j_connected or not self._driver:
+        if not self.neo4j_connected:
             logging.error("未连接到Neo4j服务器")
             return []
         
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 if direction == "outgoing":
                     if relationship_type:
                         query = (
                             f"MATCH (source:MemoryUnit {{uid: $id}})"
                             f"-[r:{relationship_type}]->"
                             f"(target:MemoryUnit) "
-                            f"RETURN target.uid AS uid"
+                            f"RETURN target.uid"
                         )
                     else:
                         query = (
                             "MATCH (source:MemoryUnit {uid: $id})"
                             "-[r]->"
                             "(target:MemoryUnit) "
-                            "RETURN target.uid AS uid"
+                            "RETURN target.uid"
                         )
                 elif direction == "incoming":
                     if relationship_type:
@@ -295,29 +352,29 @@ class Neo4jOperator:
                             f"MATCH (source:MemoryUnit)"
                             f"-[r:{relationship_type}]->"
                             f"(target:MemoryUnit {{uid: $id}}) "
-                            f"RETURN source.uid AS uid"
+                            f"RETURN source.uid"
                         )
                     else:
                         query = (
                             "MATCH (source:MemoryUnit)"
                             "-[r]->"
                             "(target:MemoryUnit {uid: $id}) "
-                            "RETURN source.uid AS uid"
+                            "RETURN source.uid"
                         )
                 else:  # "all"
                     if relationship_type:
                         query = (
                             f"MATCH (node:MemoryUnit {{uid: $id}})-[r:{relationship_type}]-(other:MemoryUnit) "
-                            f"RETURN other.uid AS uid"
+                            f"RETURN other.uid"
                         )
                     else:
                         query = (
                             "MATCH (node:MemoryUnit {uid: $id})-[r]-(other:MemoryUnit) "
-                            "RETURN other.uid AS uid"
+                            "RETURN other.uid"
                         )
                 
                 result = session.run(query, id=unit_id)
-                related_ids = [record["uid"] for record in result if record["uid"]]
+                related_ids = [record[0] for record in result]
                 return related_ids
                 
         except Exception as e:
@@ -332,6 +389,14 @@ class Neo4jOperator:
     ) -> List[MemoryUnit]:
         """
         获取与指定节点相关的完整MemoryUnit对象列表
+        
+        参数:
+            unit_id: 起始节点ID
+            relationship_type: 关系类型，如果为None则获取所有类型的关系
+            direction: 关系方向，"outgoing"表示出边，"incoming"表示入边，"all"表示所有
+            
+        返回:
+            List[MemoryUnit]: 相关MemoryUnit对象列表
         """
         # 先获取相关节点ID
         related_ids = self.get_related_node_ids(unit_id, relationship_type, direction)
@@ -340,74 +405,6 @@ class Neo4jOperator:
         if related_ids:
             return self.milvus_operator.get_units_batch(related_ids)
         return []
-    
-    def get_relationship_properties(self, source_id: str, target_id: str, relationship_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """获取关系属性"""
-        if not self.neo4j_connected or not self._driver:
-            return None
-            
-        try:
-            with self._driver.session(database=self._database) as session:
-                if relationship_type:
-                    query = (
-                        f"MATCH (source:MemoryUnit {{uid: $source_id}})"
-                        f"-[r:{relationship_type}]->"
-                        f"(target:MemoryUnit {{uid: $target_id}}) "
-                        f"RETURN properties(r) AS props"
-                    )
-                else:
-                    query = (
-                        "MATCH (source:MemoryUnit {uid: $source_id})"
-                        "-[r]->"
-                        "(target:MemoryUnit {uid: $target_id}) "
-                        "RETURN properties(r) AS props"
-                    )
-                
-                result = session.run(query, source_id=source_id, target_id=target_id)
-                record = result.single()
-                if record:
-                    return dict(record["props"])
-                return None
-        except Exception as e:
-            logging.error(f"获取关系属性失败: {e}")
-            return None
-        
-    def delete_relationship(self, source_id: str, target_id: str, relationship_type: Optional[str] = None) -> bool:
-        """删除关系"""
-        if not self.neo4j_connected or not self._driver:
-            return False
-            
-        try:
-            with self._driver.session(database=self._database) as session:
-                if relationship_type:
-                    query = (
-                        f"MATCH (source:MemoryUnit {{uid: $source_id}})"
-                        f"-[r:{relationship_type}]->"
-                        f"(target:MemoryUnit {{uid: $target_id}}) "
-                        f"DELETE r RETURN COUNT(r) AS deleted"
-                    )
-                else:
-                    query = (
-                        "MATCH (source:MemoryUnit {uid: $source_id})"
-                        "-[r]->"
-                        "(target:MemoryUnit {uid: $target_id}) "
-                        "DELETE r RETURN COUNT(r) AS deleted"
-                    )
-                
-                result = session.run(query, source_id=source_id, target_id=target_id)
-                deleted_count = result.single()["deleted"]
-                
-                if deleted_count > 0:
-                    logging.info(f"成功删除从 '{source_id}' 到 '{target_id}' 的关系")
-                    return True
-                else:
-                    logging.warning(f"未找到从 '{source_id}' 到 '{target_id}' 的关系")
-                    return False
-                    
-        except Exception as e:
-            logging.error(f"删除关系失败: {e}")
-            return False
-
     
     def search_by_text(
         self,
@@ -418,9 +415,23 @@ class Neo4jOperator:
     ) -> List[Tuple[MemoryUnit, float]]:
         """
         基于文本在Milvus中进行相似性搜索
+        
+        参数:
+            query_text: 查询文本
+            k: 返回的最相似结果数量
+            space_name: 如果提供，则仅在特定空间内搜索
+            filter_ids: 如果提供，则只从这些ID中搜索
+            
+        返回:
+            List[Tuple[MemoryUnit, float]]: [(memory_unit, distance), ...]
         """
+        # 这个方法需要先将文本转换为向量
+        # 理想情况下，这应该使用与Milvus中相同的嵌入模型
+        # 这里假设嵌入模型是外部提供的，我们只处理已经嵌入的向量
+        # 实际实现中，应该导入适当的模型进行嵌入
+        
         try:
-            # 使用适当的嵌入模型
+            # 使用适当的嵌入模型，这里使用简单模型示例
             model = SentenceTransformer('clip-ViT-B-32-multilingual-v1')
             query_vector = model.encode(query_text, normalize_embeddings=True)
             
@@ -443,9 +454,19 @@ class Neo4jOperator:
     ) -> List[Tuple[MemoryUnit, float]]:
         """
         基于向量在Milvus中进行相似性搜索
+        
+        参数:
+            query_vector: 查询向量
+            k: 返回的最相似结果数量
+            space_name: 如果提供，则仅在特定空间内搜索
+            filter_ids: 如果提供，则只从这些ID中搜索
+            
+        返回:
+            List[Tuple[MemoryUnit, float]]: [(memory_unit, distance), ...]
         """
+        # 将参数名从query_vector改为query_embedding
         return self.milvus_operator.search_similarity(
-            query_embedding=query_vector,
+            query_embedding=query_vector,  # 这里修改为query_embedding
             k=k,
             space_name=space_name,
             filter_ids=filter_ids
@@ -556,13 +577,9 @@ class Neo4jOperator:
     
     def get_all_node_ids(self) -> List[str]:
         """获取数据库中所有节点的ID列表"""
-        if not self.neo4j_connected or not self._driver:
-            logging.error("未连接到Neo4j服务器")
-            return []
-            
         try:
-            with self._driver.session(database=self._database) as session:
-                result = session.run("MATCH (n:MemoryUnit) RETURN n.uid AS uid")
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
+                result = session.run("MATCH (n) RETURN n.uid AS uid")
                 node_ids = [record["uid"] for record in result if record["uid"] is not None]
                 logging.info(f"从Neo4j获取了 {len(node_ids)} 个节点ID")
                 return node_ids
@@ -572,13 +589,10 @@ class Neo4jOperator:
 
     def node_exists(self, uid: str) -> bool:
         """检查节点是否存在"""
-        if not self.neo4j_connected or not self._driver:
-            return False
-            
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 result = session.run(
-                    "MATCH (n:MemoryUnit {uid: $uid}) RETURN COUNT(n) AS count",
+                    "MATCH (n {uid: $uid}) RETURN COUNT(n) AS count",
                     uid=uid
                 )
                 count = result.single()["count"]
@@ -588,14 +602,11 @@ class Neo4jOperator:
             return False
 
     def get_node_by_uid(self, uid: str) -> Optional[Dict[str, Any]]:
-        """根据UID获取节点数据（实际只返回基本信息，因为具体数据在Milvus中）"""
-        if not self.neo4j_connected or not self._driver:
-            return None
-            
+        """根据UID获取节点数据"""
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 result = session.run(
-                    "MATCH (n:MemoryUnit {uid: $uid}) RETURN n",
+                    "MATCH (n {uid: $uid}) RETURN n",
                     uid=uid
                 )
                 record = result.single()
@@ -608,14 +619,11 @@ class Neo4jOperator:
             return None
 
     def get_nodes_by_uids(self, uids: List[str]) -> List[Dict[str, Any]]:
-        """批量获取节点数据（从Neo4j获取基本信息）"""
-        if not self.neo4j_connected or not self._driver:
-            return []
-            
+        """批量获取节点数据"""
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 result = session.run(
-                    "MATCH (n:MemoryUnit) WHERE n.uid IN $uids RETURN n",
+                    "MATCH (n) WHERE n.uid IN $uids RETURN n",
                     uids=uids
                 )
                 nodes = [dict(record["n"]) for record in result]
@@ -672,11 +680,8 @@ class Neo4jOperator:
 
     def clear_all_data(self) -> bool:
         """清除数据库中所有数据"""
-        if not self.neo4j_connected or not self._driver:
-            return False
-            
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 # 删除所有节点和关系
                 session.run("MATCH (n) DETACH DELETE n")
                 logging.info("已清除Neo4j数据库中的所有数据")
@@ -687,13 +692,10 @@ class Neo4jOperator:
 
     def get_database_stats(self) -> Dict[str, int]:
         """获取数据库统计信息"""
-        if not self.neo4j_connected or not self._driver:
-            return {"nodes": 0, "relationships": 0}
-            
         try:
-            with self._driver.session(database=self._database) as session:
+            with self.neo4j_driver.session(database=self.neo4j_database) as session:
                 # 获取节点数量
-                node_result = session.run("MATCH (n:MemoryUnit) RETURN COUNT(n) AS node_count")
+                node_result = session.run("MATCH (n) RETURN COUNT(n) AS node_count")
                 node_count = node_result.single()["node_count"]
                 
                 # 获取关系数量
@@ -797,9 +799,9 @@ class Neo4jOperator:
     def close(self):
         """关闭所有连接"""
         # 关闭Neo4j连接
-        if self.neo4j_connected and self._driver:
+        if self.neo4j_connected:
             try:
-                self._driver.close()
+                self.neo4j_driver.close()
                 logging.info("已关闭Neo4j连接")
             except Exception as e:
                 logging.error(f"关闭Neo4j连接失败: {e}")
