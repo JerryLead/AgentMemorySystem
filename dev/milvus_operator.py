@@ -145,11 +145,10 @@ class MilvusOperator:
         try:
             # 删除可能存在的旧实体
             self.delete_unit(unit.uid)
-            # 处理raw_data和metadata为JSON字符串
-            raw_data_json = json.dumps(unit.raw_data)
-            metadata_json = json.dumps(unit.metadata if hasattr(unit, 'metadata') and unit.metadata else {})
-            # raw_data_json = json.dumps(unit.raw_data, cls=DateTimeEncoder)
-            # metadata_json = json.dumps(unit.metadata if hasattr(unit, 'metadata') and unit.metadata else {}, cls=DateTimeEncoder)
+            
+            # 处理raw_data和metadata为JSON字符串，确保中文不被转义
+            raw_data_json = json.dumps(unit.raw_data, ensure_ascii=False)
+            metadata_json = json.dumps(unit.metadata if hasattr(unit, 'metadata') and unit.metadata else {}, ensure_ascii=False)
 
             # 准备数据
             data = [

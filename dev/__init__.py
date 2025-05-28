@@ -12,6 +12,8 @@ from .memory_unit import MemoryUnit
 from .memory_space import MemorySpace
 from .milvus_operator import MilvusOperator
 from .neo4j_operator import Neo4jOperator
+from .llm_cache import LLMCacheAdvisor
+from .llm_cache import CacheAnalysisData
 
 __all__ = [
     # 核心类

@@ -12,6 +12,8 @@ from PIL import Image
 from .milvus_operator import MilvusOperator
 from .memory_unit import MemoryUnit
 from .memory_space import MemorySpace
+from .llm_cache import LLMCacheAdvisor
+from .llm_cache import CacheAnalysisData
 
 class SemanticMap:
     """
@@ -319,7 +321,7 @@ class SemanticMap:
                 if unit.uid not in self.memory_units or replace_existing:
                     # 检查内存限制
                     if len(self.memory_units) >= self._max_memory_units:
-                        self._page_out_least_used_units(count=1)
+                        self.swap_out(count=1)
                     
                     self.memory_units[unit.uid] = unit
                     self._access_counts[unit.uid] = 0  # 初始化访问计数
@@ -342,37 +344,106 @@ class SemanticMap:
             logging.error(f"从外部存储加载单元失败: {e}")
             return 0
         
-    ### 内存上下文管理函数
+    ### 内存上下文管理函数,新增对于LLM strategy的支持
 
-    def _page_out_least_used_units(self, count: int = 100):
+    def set_llm_cache_advisor(self, llm_client, model_name: str = "gpt-4"):
+        """设置LLM缓存顾问"""
+        self._llm_cache_advisor = LLMCacheAdvisor(llm_client, model_name)
+        self._recent_queries = []
+        self._last_accessed = {}
+        logging.info("LLM缓存顾问已启用")
+
+    def swap_out(self, count: int = 100, strategy: str = "LRU", query_context: Optional[str] = None):
         """
         将最少使用的单元从内存移出到外部存储
         参数:
             count: 要移出的单元数量
+            strategy: 换出策略，支持 "LLM"、"LRU"、"LFU"
+            query_context: 当前查询上下文（用于LLM策略）
         """
         if not self._external_storage:
             logging.warning("没有配置外部存储，无法执行换页操作")
             return
+        
+        if len(self.memory_units) == 0:
+            logging.debug("内存中没有单元可以换出")
+            return
+        
+        # 根据策略确定要换出的单元
+        units_to_page_out = []
+        
+        if strategy == "LLM" and hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
+            try:
+                # 使用LLM进行智能决策
+                analysis_data = self._llm_cache_advisor.analyze_cache_context(
+                    memory_units=self.memory_units,
+                    access_counts=self._access_counts,
+                    last_accessed=getattr(self, '_last_accessed', {}),
+                    current_query_context=query_context
+                )
+                
+                recommended_uids = self._llm_cache_advisor.recommend_eviction(
+                    analysis_data=analysis_data,
+                    eviction_count=count,
+                    current_query_context=query_context,
+                    recent_queries=getattr(self, '_recent_queries', [])
+                )
+                
+                units_to_page_out = [(uid, 0) for uid in recommended_uids]
+                logging.info(f"LLM推荐换出单元: {recommended_uids}")
+                
+            except Exception as e:
+                logging.error(f"LLM缓存决策失败: {e}，降级使用LRU算法")
+                strategy = "LRU"  # 降级到LRU
+        
+        # 如果是LRU、LFU策略，或者LLM策略失败后的降级
+        if strategy in ["LRU", "LFU"] or not units_to_page_out:
+            if strategy == "LRU":
+                # 按最后访问时间排序，最少最近使用的优先换出
+                sorted_units = sorted(
+                    [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
+                    key=lambda x: x[1]  # 按最后访问时间排序，时间越早越优先换出
+                )
+            elif strategy == "LFU":
+                # 按访问频率排序，访问次数最少的优先换出
+                sorted_units = sorted(
+                    [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
+                    key=lambda x: x[1]  # 按访问次数排序，次数越少越优先换出
+                )
+            else:  # 默认使用LRU
+                logging.warning(f"不支持的换出策略: {strategy}，使用LRU")
+                sorted_units = sorted(
+                    [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
+                    key=lambda x: x[1]
+                )
             
-        # 按访问次数排序，找出最少使用的单元
-        sorted_units = sorted(
-            [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
-            key=lambda x: x[1]
-        )
+            # 限制换出数量
+            actual_count = min(count, len(sorted_units))
+            units_to_page_out = sorted_units[:actual_count]
         
-        units_to_page_out = sorted_units[:min(count, len(sorted_units))]
+        if not units_to_page_out:
+            logging.debug("没有找到可换出的单元")
+            return
         
+        # 执行换出操作
         synced_count = 0
-        # 确保修改过的单元先同步到外部存储
+        removed_count = 0
+        
         for uid, _ in units_to_page_out:
-            if uid in self._modified_units:
-                if self._sync_unit_to_external(uid):
-                    self._modified_units.remove(uid)
-                    synced_count += 1
-            else:
-                # 即使未修改，也需要确保在外部存储中
-                self._sync_unit_to_external(uid)
+            unit = self.memory_units.get(uid)
+            if not unit:
+                continue
+                
+            # 获取单元所属空间
+            space_names = []
+            for space_name, space in self.memory_spaces.items():
+                if uid in space.get_memory_uids():
+                    space_names.append(space_name)
+            
+            # 同步到外部存储
+            if self._external_storage.add_unit(unit, space_names):
                 synced_count += 1
+                self._modified_units.discard(uid)
             
             # 从FAISS索引中移除
             if uid in self._uid_to_internal_faiss_id and self.faiss_index:
@@ -381,21 +452,22 @@ class SemanticMap:
                     if hasattr(self.faiss_index, 'remove_ids'):
                         self.faiss_index.remove_ids(np.array([internal_id], dtype=np.int64))
                     del self._uid_to_internal_faiss_id[uid]
-                    logging.debug(f"单元 '{uid}' 已从FAISS索引中移除")
                 except Exception as e:
                     logging.error(f"从FAISS索引移除单元 '{uid}' 失败: {e}")
             
             # 从内存中移除
             if uid in self.memory_units:
                 del self.memory_units[uid]
+                removed_count += 1
                 
-            # 清理访问计数
-            if uid in self._access_counts:
-                del self._access_counts[uid]
+            # 清理访问计数和时间记录
+            self._access_counts.pop(uid, None)
+            if hasattr(self, '_last_accessed'):
+                self._last_accessed.pop(uid, None)
                 
-            logging.debug(f"单元 '{uid}' 已从内存页出")
+            logging.debug(f"单元 '{uid}' 已从内存换出（策略: {strategy}）")
 
-        logging.info(f"已将 {len(units_to_page_out)} 个单元从内存页出，其中 {synced_count} 个已同步到外部存储")
+        logging.info(f"使用{strategy}策略已将 {removed_count} 个单元从内存换出，其中 {synced_count} 个已同步到外部存储")
 
     def _load_unit_from_external(self, uid: str) -> Optional[MemoryUnit]:
         """从外部存储(Milvus)加载单元到内存"""
@@ -412,6 +484,117 @@ class SemanticMap:
             logging.error(f"从外部存储加载单元 '{uid}' 失败: {e}")
         
         return None
+    
+    # def _unpersist_least_used_units(self, 
+    #                                 count: int = 100, 
+    #                                 query_context: Optional[str] = None):
+    #     """
+    #     使用LLM智能决策要换出的单元
+    #     参数:
+    #         count: 要移出的单元数量  
+    #         query_context: 当前查询上下文
+    #     """
+    #     if not self._external_storage:
+    #         logging.warning("没有配置外部存储，无法执行换页操作")
+    #         return
+        
+    #     if len(self.memory_units) == 0:
+    #         logging.debug("内存中没有单元可以换出")
+    #         return
+            
+    #     # 检查是否配置了LLM顾问
+    #     if hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
+    #         try:
+    #             # 使用LLM进行智能决策
+    #             analysis_data = self._llm_cache_advisor.analyze_cache_context(
+    #                 memory_units=self.memory_units,
+    #                 access_counts=self._access_counts,
+    #                 last_accessed=getattr(self, '_last_accessed', {}),
+    #                 current_query_context=query_context
+    #             )
+                
+    #             recommended_uids = self._llm_cache_advisor.recommend_eviction(
+    #                 analysis_data=analysis_data,
+    #                 eviction_count=count,
+    #                 current_query_context=query_context,
+    #                 recent_queries=getattr(self, '_recent_queries', [])
+    #             )
+                
+    #             units_to_page_out = [(uid, 0) for uid in recommended_uids]
+    #             logging.info(f"LLM推荐换出单元: {recommended_uids}")
+                
+    #         except Exception as e:
+    #             logging.error(f"LLM缓存决策失败: {e}，使用传统算法")
+    #             # 降级到传统算法
+    #             sorted_units = sorted(
+    #                 [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
+    #                 key=lambda x: x[1]
+    #             )
+    #             actual_count = min(count, len(sorted_units))
+    #             units_to_page_out = sorted_units[:actual_count]
+    #     else:
+    #         # 使用传统LRU算法
+    #         sorted_units = sorted(
+    #             [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
+    #             key=lambda x: x[1]
+    #         )
+    #         actual_count = min(count, len(sorted_units))
+    #         units_to_page_out = sorted_units[:actual_count]
+        
+    #     # 执行换出操作
+    #     synced_count = 0
+    #     removed_count = 0
+        
+    #     for uid, _ in units_to_page_out:
+    #         unit = self.memory_units.get(uid)
+    #         if not unit:
+    #             continue
+                
+    #         # 获取单元所属空间
+    #         space_names = []
+    #         for space_name, space in self.memory_spaces.items():
+    #             if uid in space.get_memory_uids():
+    #                 space_names.append(space_name)
+            
+    #         # 同步到外部存储
+    #         if self._external_storage.add_unit(unit, space_names):
+    #             synced_count += 1
+    #             self._modified_units.discard(uid)
+            
+    #         # 从FAISS索引中移除
+    #         if uid in self._uid_to_internal_faiss_id and self.faiss_index:
+    #             try:
+    #                 internal_id = self._uid_to_internal_faiss_id[uid]
+    #                 if hasattr(self.faiss_index, 'remove_ids'):
+    #                     self.faiss_index.remove_ids(np.array([internal_id], dtype=np.int64))
+    #                 del self._uid_to_internal_faiss_id[uid]
+    #             except Exception as e:
+    #                 logging.error(f"从FAISS索引移除单元 '{uid}' 失败: {e}")
+            
+    #         # 从内存中移除
+    #         if uid in self.memory_units:
+    #             del self.memory_units[uid]
+    #             removed_count += 1
+                
+    #         # 清理访问计数
+    #         self._access_counts.pop(uid, None)
+                
+    #         logging.debug(f"单元 '{uid}' 已从内存页出")
+
+    #     logging.info(f"已将 {removed_count} 个单元从内存页出，其中 {synced_count} 个已同步到外部存储")
+
+    def record_query(self, query: str, accessed_uids: List[str]):
+        """记录查询和访问的单元"""
+        self._recent_queries.append(query)
+        if len(self._recent_queries) > 10:  # 只保留最近10个查询
+            self._recent_queries = self._recent_queries[-10:]
+        
+        # 更新访问时间
+        current_time = datetime.now().timestamp()
+        for uid in accessed_uids:
+            self._last_accessed[uid] = current_time
+            if hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
+                self._llm_cache_advisor.record_access(uid, query)
     
     ### 内存单元操作函数
     
@@ -431,7 +614,8 @@ class SemanticMap:
         
         # 检查内存限制，必要时触发换页
         if len(self.memory_units) >= self._max_memory_units:
-            self._page_out_least_used_units(count=int(self._max_memory_units * 0.1))  # 换出10%
+            page_out_count = max(1, int(self._max_memory_units * 0.1))  # 至少换出1个
+            self.swap_out(count=page_out_count)
         
         if explicit_content_for_embedding is None:
             logging.debug(f"未提供显式内容用于嵌入，尝试从单元 '{unit.uid}' 的值中推断")
@@ -484,7 +668,7 @@ class SemanticMap:
             if unit:
                 # 检查内存是否已满，必要时换页
                 if len(self.memory_units) >= self._max_memory_units:
-                    self._page_out_least_used_units(count=1)
+                    self.swap_out(count=1)
                 
                 self.memory_units[uid] = unit
                 self._record_unit_access(uid)
