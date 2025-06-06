@@ -3,7 +3,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple, Any
 from dataclasses import dataclass
+from openai import OpenAI
 import numpy as np
+
+import os
 
 @dataclass
 class CacheAnalysisData:
@@ -21,8 +24,8 @@ class LLMCacheAdvisor:
     """基于大模型的缓存决策顾问"""
     
     def __init__(self, 
-                 llm_client=None,  # 可以是OpenAI、DeepSeek等的客户端
-                 model_name: str = "gpt-4",
+                 llm_client:OpenAI=None,  # 可以是OpenAI、DeepSeek等的客户端
+                 model_name: str = "deepseek-chat",
                  max_context_units: int = 50):
         """
         初始化LLM缓存顾问
@@ -32,6 +35,11 @@ class LLMCacheAdvisor:
             model_name: 模型名称
             max_context_units: 最大上下文单元数量
         """
+        if llm_client is None:
+            self.llm_client = OpenAI(
+                api_key = os.getenv("DEEPSEEK_API_KEY"),
+                base_url = "https://api.deepseek.com"
+                )  # 默认使用OpenAI客户端
         self.llm_client = llm_client
         self.model_name = model_name
         self.max_context_units = max_context_units

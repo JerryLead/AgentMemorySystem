@@ -252,9 +252,9 @@ class SemanticMap:
 
     def sync_to_external(self, force_full_sync: bool = False):
         """
-        将修改过的单元同步到外部存储
+        智能同步数据到外部存储
         参数:
-            force_full_sync: 如果为True，则同步所有单元，而不仅是修改过的单元
+            force_full_sync: 强制全量同步所有数据
         返回:
             (success_count, fail_count): 成功和失败的单元数量
         """
@@ -265,8 +265,30 @@ class SemanticMap:
         success_count = 0
         fail_count = 0
         
+        # 确定同步模式
+        sync_mode = "full" if force_full_sync else "incremental"
+        
+        # 自动检测首次同步
+        if not force_full_sync and not hasattr(self, '_last_sync_time') or self._last_sync_time is None:
+            # 检查外部存储是否为空来判断是否为首次同步
+            try:
+                # 尝试获取少量数据来检测是否为空
+                sample_units = self._external_storage.get_units_batch([], limit=1)
+                if len(sample_units) == 0:
+                    force_full_sync = True
+                    sync_mode = "auto_full"
+                    logging.info("检测到首次同步，将执行全量同步")
+            except Exception as e:
+                logging.warning(f"检测外部存储状态失败: {e}，使用增量同步")
+        
+        if force_full_sync:
+            logging.info(f"开始全量同步到外部存储... (模式: {sync_mode})")
+        else:
+            logging.info("开始增量同步到外部存储...")
+        
         # 处理修改过的单元
         units_to_sync = list(self.memory_units.keys()) if force_full_sync else list(self._modified_units)
+        
         for uid in units_to_sync:
             if uid in self.memory_units:  # 确保单元仍然存在
                 if self._sync_unit_to_external(uid):
@@ -289,9 +311,25 @@ class SemanticMap:
                 logging.error(f"从外部存储删除单元 '{uid}' 失败: {e}")
                 fail_count += 1
         
-        self._last_sync_time = datetime.now()
-        logging.info(f"与外部存储同步完成。成功: {success_count}, 失败: {fail_count}")
+        # 更新同步状态
+        if success_count > 0:
+            self._last_sync_time = datetime.now()
+            # 如果是全量同步，清理所有修改标记
+            if force_full_sync:
+                self._modified_units.clear()
+                self._deleted_units.clear()
+        
+        logging.info(f"同步完成 ({sync_mode})。成功: {success_count}, 失败: {fail_count}")
         return success_count, fail_count
+
+    # 保留原有方法作为便利函数
+    def incremental_sync(self):
+        """增量同步修改过的单元到外部存储"""
+        return self.sync_to_external(force_full_sync=False)
+
+    def full_sync(self):
+        """完整同步所有单元到外部存储"""
+        return self.sync_to_external(force_full_sync=True)
 
     def load_from_external(self, 
                  filter_space: Optional[str] = None,
@@ -484,104 +522,6 @@ class SemanticMap:
             logging.error(f"从外部存储加载单元 '{uid}' 失败: {e}")
         
         return None
-    
-    # def _unpersist_least_used_units(self, 
-    #                                 count: int = 100, 
-    #                                 query_context: Optional[str] = None):
-    #     """
-    #     使用LLM智能决策要换出的单元
-    #     参数:
-    #         count: 要移出的单元数量  
-    #         query_context: 当前查询上下文
-    #     """
-    #     if not self._external_storage:
-    #         logging.warning("没有配置外部存储，无法执行换页操作")
-    #         return
-        
-    #     if len(self.memory_units) == 0:
-    #         logging.debug("内存中没有单元可以换出")
-    #         return
-            
-    #     # 检查是否配置了LLM顾问
-    #     if hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
-    #         try:
-    #             # 使用LLM进行智能决策
-    #             analysis_data = self._llm_cache_advisor.analyze_cache_context(
-    #                 memory_units=self.memory_units,
-    #                 access_counts=self._access_counts,
-    #                 last_accessed=getattr(self, '_last_accessed', {}),
-    #                 current_query_context=query_context
-    #             )
-                
-    #             recommended_uids = self._llm_cache_advisor.recommend_eviction(
-    #                 analysis_data=analysis_data,
-    #                 eviction_count=count,
-    #                 current_query_context=query_context,
-    #                 recent_queries=getattr(self, '_recent_queries', [])
-    #             )
-                
-    #             units_to_page_out = [(uid, 0) for uid in recommended_uids]
-    #             logging.info(f"LLM推荐换出单元: {recommended_uids}")
-                
-    #         except Exception as e:
-    #             logging.error(f"LLM缓存决策失败: {e}，使用传统算法")
-    #             # 降级到传统算法
-    #             sorted_units = sorted(
-    #                 [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
-    #                 key=lambda x: x[1]
-    #             )
-    #             actual_count = min(count, len(sorted_units))
-    #             units_to_page_out = sorted_units[:actual_count]
-    #     else:
-    #         # 使用传统LRU算法
-    #         sorted_units = sorted(
-    #             [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
-    #             key=lambda x: x[1]
-    #         )
-    #         actual_count = min(count, len(sorted_units))
-    #         units_to_page_out = sorted_units[:actual_count]
-        
-    #     # 执行换出操作
-    #     synced_count = 0
-    #     removed_count = 0
-        
-    #     for uid, _ in units_to_page_out:
-    #         unit = self.memory_units.get(uid)
-    #         if not unit:
-    #             continue
-                
-    #         # 获取单元所属空间
-    #         space_names = []
-    #         for space_name, space in self.memory_spaces.items():
-    #             if uid in space.get_memory_uids():
-    #                 space_names.append(space_name)
-            
-    #         # 同步到外部存储
-    #         if self._external_storage.add_unit(unit, space_names):
-    #             synced_count += 1
-    #             self._modified_units.discard(uid)
-            
-    #         # 从FAISS索引中移除
-    #         if uid in self._uid_to_internal_faiss_id and self.faiss_index:
-    #             try:
-    #                 internal_id = self._uid_to_internal_faiss_id[uid]
-    #                 if hasattr(self.faiss_index, 'remove_ids'):
-    #                     self.faiss_index.remove_ids(np.array([internal_id], dtype=np.int64))
-    #                 del self._uid_to_internal_faiss_id[uid]
-    #             except Exception as e:
-    #                 logging.error(f"从FAISS索引移除单元 '{uid}' 失败: {e}")
-            
-    #         # 从内存中移除
-    #         if uid in self.memory_units:
-    #             del self.memory_units[uid]
-    #             removed_count += 1
-                
-    #         # 清理访问计数
-    #         self._access_counts.pop(uid, None)
-                
-    #         logging.debug(f"单元 '{uid}' 已从内存页出")
-
-    #     logging.info(f"已将 {removed_count} 个单元从内存页出，其中 {synced_count} 个已同步到外部存储")
 
     def record_query(self, query: str, accessed_uids: List[str]):
         """记录查询和访问的单元"""
@@ -1037,6 +977,8 @@ class SemanticMap:
     ) -> bool:
         """
         将SemanticMap中的内存单元导出到Milvus数据库
+
+        注意：此方法已废弃，推荐使用 sync_to_external() 方法
         
         参数:
             host: Milvus服务器地址
@@ -1048,13 +990,9 @@ class SemanticMap:
         返回:
             导出是否成功
         """
-        # try:
-        #     # 延迟导入，避免强制依赖
-        #     from milvus_operator import MilvusOperator
-        # except ImportError:
-        #     logging.error("未找到milvus_operator模块，请确保已安装pymilvus并创建了milvus_operator.py")
-        #     return False
-        
+    
+        logging.warning("export_to_milvus() 方法已废弃，推荐使用 sync_to_external() 方法")
+
         try:
             # 创建Milvus操作类
             milvus_op = MilvusOperator(
