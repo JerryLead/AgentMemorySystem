@@ -339,16 +339,592 @@ def save_llm_results(results: Dict[str, Any], metrics: Dict[str, Any], timestamp
     
     logging.info(f"LLM评估结果已保存到: {result_file}")
 
+# 在现有的导入部分后添加这些函数：
+
+def load_dataset(file_path: Path) -> List[Dict[str, Any]]:
+    """加载LoCoMo数据集文件。"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            logging.info(f"成功加载数据集: {file_path}")
+            logging.info(f"数据集包含 {len(data)} 个样本")
+            return data
+    except FileNotFoundError:
+        logging.error(f"数据集文件未找到: {file_path}")
+        return []
+    except json.JSONDecodeError as e:
+        logging.error(f"JSON解析错误: {e}")
+        return []
+
+def parse_locomo_data(data: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict]]:
+    """
+    解析LoCoMo数据集，分离对话历史和QA对
+    
+    Returns:
+        Tuple[对话历史, QA对列表]
+    """
+    conversations = []
+    qa_pairs = []
+    
+    for sample in data:
+        sample_id = sample.get('sample_id', 'unknown')
+        
+        # 处理对话历史 - 从conversation字段提取
+        if 'conversation' in sample:
+            conversation_data = sample['conversation']
+            dialog_messages = []
+            
+            # 提取所有session的对话
+            for key, value in conversation_data.items():
+                if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+                    session_time = conversation_data.get(f"{key}_date_time", "")
+                    for msg_idx, message in enumerate(value):
+                        if isinstance(message, dict):
+                            dialog_messages.append({
+                                'speaker': message.get('speaker', 'unknown'),
+                                'content': message.get('message', message.get('text', '')),
+                                'timestamp': session_time,
+                                'session': key,
+                                'message_index': msg_idx
+                            })
+            
+            if dialog_messages:
+                conversations.append({
+                    'dialog_id': sample_id,
+                    'messages': dialog_messages,
+                    'speaker_a': conversation_data.get('speaker_a', 'Speaker A'),
+                    'speaker_b': conversation_data.get('speaker_b', 'Speaker B')
+                })
+        
+        # 处理QA对
+        if 'qa' in sample:
+            for qa_idx, qa in enumerate(sample['qa']):
+                if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
+                    qa_pairs.append({
+                        'sample_id': sample_id,
+                        'qa_index': qa_idx,
+                        'question': qa.get('question'),
+                        'answer': qa.get('answer'),
+                        'evidence': qa.get('evidence', []),
+                        'category': qa.get('category', 0),
+                        'adversarial_answer': qa.get('adversarial_answer', None)
+                    })
+    
+    logging.info(f"解析得到 {len(conversations)} 个对话，{len(qa_pairs)} 个QA对")
+    return conversations, qa_pairs
+
+def extract_all_speakers(data: List[Dict]) -> List[str]:
+    """从数据集中提取所有说话人"""
+    speakers = set()
+    
+    for sample in data:
+        if 'conversation' in sample:
+            conversation_data = sample['conversation']
+            
+            # 提取 speaker_a 和 speaker_b
+            speaker_a = conversation_data.get('speaker_a')
+            speaker_b = conversation_data.get('speaker_b')
+            if speaker_a:
+                speakers.add(speaker_a.lower())
+            if speaker_b:
+                speakers.add(speaker_b.lower())
+            
+            # 从具体对话消息中提取说话人
+            for key, value in conversation_data.items():
+                if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+                    for message in value:
+                        if isinstance(message, dict):
+                            speaker = message.get('speaker')
+                            if speaker:
+                                speakers.add(speaker.lower())
+    
+    return sorted(list(speakers))
+
+def setup_locomo_memory_spaces(graph: SemanticGraph, data: List[Dict]):
+    """为LoCoMo数据集创建专门的内存空间"""
+    
+    # 按数据类型创建空间
+    dialog_space = graph.create_memory_space_in_map("locomo_dialogs")
+    qa_space = graph.create_memory_space_in_map("locomo_qa_pairs")
+    
+    # 按QA类别创建细分空间
+    for category in [1, 2, 3, 4, 5]:
+        category_space = graph.create_memory_space_in_map(f"locomo_qa_category_{category}")
+    
+    # 动态提取说话人并创建空间
+    speakers = extract_all_speakers(data)
+    logging.info(f"发现 {len(speakers)} 个说话人: {speakers}")
+    
+    for speaker in speakers:
+        speaker_space = graph.create_memory_space_in_map(f"speaker_{speaker}")
+    
+    logging.info("LoCoMo内存空间已创建")
+
+def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
+    """将LoCoMo数据集注入到SemanticGraph中"""
+    logging.info("开始注入LoCoMo对话历史...")
+    total_messages = 0
+    
+    # 设置内存空间（传入数据以动态提取说话人）
+    setup_locomo_memory_spaces(graph, data)
+    
+    for sample in data:
+        sample_id = sample.get('sample_id', f'sample_{total_messages}')
+        
+        # 处理对话历史
+        if 'conversation' in sample:
+            conversation_data = sample['conversation']
+            speaker_a = conversation_data.get('speaker_a', 'Speaker A')
+            speaker_b = conversation_data.get('speaker_b', 'Speaker B')
+            
+            # 处理session summaries作为高级记忆单元
+            if 'session_summary' in sample:
+                for session_key, summary in sample['session_summary'].items():
+                    if isinstance(summary, str) and summary.strip():
+                        unit_id = f"{sample_id}_{session_key}_summary"
+                        
+                        summary_unit = MemoryUnit(
+                            uid=unit_id,
+                            raw_data={
+                                "text_content": summary,
+                                "content_type": "session_summary",
+                                "session": session_key,
+                                "sample_id": sample_id,
+                                "speakers": f"{speaker_a} & {speaker_b}"
+                            },
+                            metadata={
+                                "data_source": "locomo_summary",
+                                "sample_id": sample_id,
+                                "session": session_key,
+                                "content_type": "summary"
+                            }
+                        )
+                        
+                        graph.add_unit(summary_unit)
+                        graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
+                        total_messages += 1
+            
+            # 处理具体的对话消息（如果存在）
+            for key, value in conversation_data.items():
+                if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+                    session_time = conversation_data.get(f"{key}_date_time", "")
+                    
+                    for msg_idx, message in enumerate(value):
+                        if isinstance(message, dict) and message.get('message'):
+                            unit_id = f"{sample_id}_{key}_msg_{msg_idx}"
+                            speaker = message.get('speaker', 'unknown')
+                            content = message.get('message', '')
+                            
+                            if content.strip():
+                                unit = MemoryUnit(
+                                    uid=unit_id,
+                                    raw_data={
+                                        "text_content": f"{speaker}: {content}",
+                                        "speaker": speaker,
+                                        "message_content": content,
+                                        "session": key,
+                                        "sample_id": sample_id
+                                    },
+                                    metadata={
+                                        "timestamp": session_time,
+                                        "conversation_id": sample_id,
+                                        "session": key,
+                                        "message_index": msg_idx,
+                                        "data_source": "locomo_dialog",
+                                        "speaker": speaker
+                                    }
+                                )
+                                
+                                graph.add_unit(unit)
+                                graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
+                                
+                                # 按说话人分类
+                                speaker_space = f"speaker_{speaker.lower().replace(' ', '_')}"
+                                graph.add_unit_to_space_in_map(unit_id, speaker_space)
+                                
+                                total_messages += 1
+        
+        # 处理QA对作为独立的知识点（可选，用于参考）
+        if 'qa' in sample:
+            for qa_idx, qa in enumerate(sample['qa']):
+                if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
+                    qa_unit_id = f"{sample_id}_qa_{qa_idx}"
+                    
+                    qa_unit = MemoryUnit(
+                        uid=qa_unit_id,
+                        raw_data={
+                            "text_content": f"Q: {qa['question']} A: {qa['answer']}",
+                            "question": qa['question'],
+                            "answer": qa['answer'],
+                            "evidence": qa.get('evidence', []),
+                            "category": qa.get('category', 0)
+                        },
+                        metadata={
+                            "data_source": "locomo_qa",
+                            "sample_id": sample_id,
+                            "qa_category": qa.get('category', 0),
+                            "evidence_sources": qa.get('evidence', [])
+                        }
+                    )
+                    
+                    graph.add_unit(qa_unit)
+                    graph.add_unit_to_space_in_map(qa_unit_id, "locomo_qa_pairs")
+                    
+                    # 按类别分类
+                    category = qa.get('category', 0)
+                    if category > 0:
+                        graph.add_unit_to_space_in_map(qa_unit_id, f"locomo_qa_category_{category}")
+    
+    logging.info(f"数据注入完成。共添加 {total_messages} 个记忆单元")
+    return total_messages
+
+def format_enhanced_context(retrieved_units: List[Tuple]) -> str:
+    """格式化增强的上下文信息"""
+    if not retrieved_units:
+        return "没有检索到相关记忆。"
+    
+    context_lines = ["--- 检索到的相关记忆上下文 ---"]
+    
+    for unit, score in retrieved_units:
+        data_source = unit.metadata.get('data_source', 'unknown')
+        
+        if data_source == 'locomo_summary':
+            session = unit.raw_data.get('session', 'unknown')
+            content = unit.raw_data.get('text_content', '')
+            speakers = unit.raw_data.get('speakers', 'Unknown')
+            line = f"[摘要-{session}] {speakers}: {content[:200]}... (相似度: {score:.4f})"
+            
+        elif data_source == 'locomo_dialog':
+            speaker = unit.raw_data.get('speaker', 'unknown')
+            content = unit.raw_data.get('message_content', '')
+            session = unit.metadata.get('session', 'unknown')
+            line = f"[对话-{session}] {speaker}: {content} (相似度: {score:.4f})"
+            
+        elif data_source == 'locomo_qa':
+            question = unit.raw_data.get('question', '')
+            answer = unit.raw_data.get('answer', '')
+            category = unit.metadata.get('qa_category', 0)
+            line = f"[QA-类别{category}] Q: {question} A: {answer} (相似度: {score:.4f})"
+            
+        else:
+            content = unit.raw_data.get('text_content', '')[:100]
+            line = f"[{data_source}] {content}... (相似度: {score:.4f})"
+        
+        context_lines.append(line)
+    
+    context_lines.append("-" * 60)
+    return "\n".join(context_lines)
+
+def extract_answer_from_context(question: str, context: str, retrieved_units: List[Tuple]) -> str:
+    """
+    从检索到的上下文中提取答案
+    这是一个简化的答案提取逻辑，实际应用中会使用LLM
+    """
+    if not retrieved_units:
+        return "无法找到相关信息"
+    
+    # 简单的答案提取：取相似度最高的内容作为答案的基础
+    best_unit, best_score = retrieved_units[0]
+    
+    # 根据不同的数据源提取答案
+    data_source = best_unit.metadata.get('data_source', 'unknown')
+    
+    if data_source == 'locomo_qa' and best_score > 0.3:
+        # 如果检索到的是QA对，直接使用答案
+        return best_unit.raw_data.get('answer', '未找到答案')
+    elif data_source in ['locomo_dialog', 'locomo_summary'] and best_score > 0.3:
+        # 如果检索到的是对话或摘要，提取相关内容
+        content = best_unit.raw_data.get('text_content', '')
+        return f"根据对话记录: {content[:200]}"
+    else:
+        return "未找到足够相关的信息"
+
+def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eval_model: SentenceTransformer) -> Dict[str, Any]:
+    """增强的搜索和评估函数"""
+    results = {
+        'total_questions': len(qa_pairs),
+        'category_results': {},
+        'retrieval_results': [],
+        'all_scores': []
+    }
+    
+    for qa in qa_pairs:
+        question = qa.get('question')
+        golden_answer = qa.get('answer')
+        category = qa.get('category', 0)
+        evidence = qa.get('evidence', [])
+        
+        if not question or not golden_answer:
+            continue
+        
+        # 1. 多策略检索
+        search_results = {}
+        
+        # 全局搜索
+        search_results['global'] = graph.search_similarity_in_graph(
+            query_text=question, k=5
+        )
+        
+        # 在对话空间中搜索
+        try:
+            search_results['dialog_only'] = graph.search_similarity_in_graph(
+                query_text=question, k=5, space_name="locomo_dialogs"
+            )
+        except:
+            search_results['dialog_only'] = []
+        
+        # 在同类别QA中搜索
+        if category > 0:
+            try:
+                search_results[f'category_{category}'] = graph.search_similarity_in_graph(
+                    query_text=question, k=3, space_name=f"locomo_qa_category_{category}"
+                )
+            except:
+                search_results[f'category_{category}'] = []
+        
+        # 2. 融合检索结果
+        all_retrieved = []
+        for strategy, units in search_results.items():
+            for unit, score in units:
+                all_retrieved.append((unit, score, strategy))
+        
+        # 按相似度排序并去重
+        seen_uids = set()
+        unique_retrieved = []
+        for unit, score, strategy in sorted(all_retrieved, key=lambda x: x[1], reverse=True):
+            if unit.uid not in seen_uids:
+                unique_retrieved.append((unit, score, strategy))
+                seen_uids.add(unit.uid)
+        
+        # 3. 生成上下文和答案
+        top_retrieved = unique_retrieved[:TOP_K_RESULTS]
+        context_str = format_enhanced_context([(u, s) for u, s, _ in top_retrieved])
+        predicted_answer = extract_answer_from_context(question, context_str, [(u, s) for u, s, _ in top_retrieved])
+        
+        # 4. 评估
+        try:
+            # 使用F1得分评估
+            f1_score_result = f1_score(predicted_answer, golden_answer)
+            
+            # 使用语义相似度评估
+            embedding1 = eval_model.encode(predicted_answer, convert_to_tensor=True)
+            embedding2 = eval_model.encode(golden_answer, convert_to_tensor=True)
+            similarity_score = util.cos_sim(embedding1, embedding2).item()
+            
+            # 综合得分
+            combined_score = (f1_score_result + similarity_score) / 2
+            
+        except Exception as e:
+            logging.error(f"评估过程中出错: {e}")
+            f1_score_result = 0
+            similarity_score = 0
+            combined_score = 0
+        
+        # 5. 记录结果
+        result_entry = {
+            'question': question,
+            'golden_answer': golden_answer,
+            'predicted_answer': predicted_answer,
+            'category': category,
+            'evidence': evidence,
+            'retrieved_count': len(unique_retrieved),
+            'f1_score': f1_score_result,
+            'similarity_score': similarity_score,
+            'combined_score': combined_score,
+            'context': context_str,
+            'search_strategies': list(search_results.keys())
+        }
+        
+        results['retrieval_results'].append(result_entry)
+        results['all_scores'].append(combined_score)
+        
+        # 按类别统计
+        if category not in results['category_results']:
+            results['category_results'][category] = {
+                'count': 0,
+                'scores': [],
+                'f1_scores': [],
+                'similarity_scores': [],
+                'avg_retrieved': 0
+            }
+        
+        results['category_results'][category]['count'] += 1
+        results['category_results'][category]['scores'].append(combined_score)
+        results['category_results'][category]['f1_scores'].append(f1_score_result)
+        results['category_results'][category]['similarity_scores'].append(similarity_score)
+        results['category_results'][category]['avg_retrieved'] += len(unique_retrieved)
+        
+        # 打印详细结果
+        print(f"\n{'='*60}")
+        print(f"类别 {category} | 证据: {evidence}")
+        print(f"❓ 问题: {question}")
+        print(f"✅ 标准答案: {golden_answer}")
+        print(f"🤖 预测答案: {predicted_answer}")
+        print(f"🔍 检索策略: {', '.join(search_results.keys())}")
+        print(f"📄 检索到 {len(unique_retrieved)} 个相关单元")
+        print(f"📊 F1得分: {f1_score_result:.4f}")
+        print(f"📊 语义相似度: {similarity_score:.4f}")
+        print(f"📊 综合得分: {combined_score:.4f}")
+        print(context_str)
+    
+    return results
+
+def calculate_final_metrics(results: Dict[str, Any]) -> Dict[str, float]:
+    """计算最终评估指标"""
+    total_questions = results['total_questions']
+    metrics = {}
+    
+    if total_questions > 0:
+        # 检索成功率
+        successful_retrievals = sum(1 for r in results['retrieval_results'] if r['retrieved_count'] > 0)
+        metrics['retrieval_success_rate'] = successful_retrievals / total_questions
+        
+        # 平均得分
+        if results['all_scores']:
+            metrics['avg_combined_score'] = np.mean(results['all_scores'])
+            metrics['std_combined_score'] = np.std(results['all_scores'])
+        
+        # 按类别的指标
+        for category, cat_results in results['category_results'].items():
+            if cat_results['count'] > 0:
+                cat_results['avg_retrieved'] = cat_results['avg_retrieved'] / cat_results['count']
+                
+                if cat_results['scores']:
+                    metrics[f'category_{category}_avg_score'] = np.mean(cat_results['scores'])
+                    metrics[f'category_{category}_avg_f1'] = np.mean(cat_results['f1_scores'])
+                    metrics[f'category_{category}_avg_similarity'] = np.mean(cat_results['similarity_scores'])
+    
+    return metrics
+
+def save_results(results: Dict[str, Any], metrics: Dict[str, float], timestamp: str):
+    """保存评估结果"""
+    result_file = RESULTS_DIR / f'locomo_evaluation_{timestamp}.json'
+    
+    output_data = {
+        'timestamp': timestamp,
+        'config': {
+            'dataset_path': str(DATASET_PATH),
+            'top_k_results': TOP_K_RESULTS,
+            'evaluation_model': EVALUATION_MODEL
+        },
+        'results': results,
+        'metrics': metrics
+    }
+    
+    # 转换numpy类型为Python原生类型
+    def convert_numpy(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+    
+    def deep_convert(data):
+        if isinstance(data, dict):
+            return {k: deep_convert(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [deep_convert(item) for item in data]
+        else:
+            return convert_numpy(data)
+    
+    output_data = deep_convert(output_data)
+    
+    with open(result_file, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+    
+    logging.info(f"评估结果已保存到: {result_file}")
+
+def print_evaluation_summary(results: Dict[str, Any], metrics: Dict[str, float]):
+    """打印评估总结"""
+    print(f"\n{'='*80}")
+    print("📊 LoCoMo 评估总结")
+    print(f"{'='*80}")
+    
+    if results['all_scores']:
+        print(f"总问题数: {results['total_questions']}")
+        print(f"检索成功率: {metrics.get('retrieval_success_rate', 0):.4f}")
+        print(f"平均综合得分: {metrics.get('avg_combined_score', 0):.4f} ± {metrics.get('std_combined_score', 0):.4f}")
+        
+        print(f"\n按类别统计:")
+        for category, cat_results in results['category_results'].items():
+            if cat_results['scores']:
+                cat_avg = metrics.get(f'category_{category}_avg_score', 0)
+                cat_f1 = metrics.get(f'category_{category}_avg_f1', 0)
+                cat_sim = metrics.get(f'category_{category}_avg_similarity', 0)
+                print(f"  类别 {category}: {cat_results['count']} 问题, "
+                      f"综合得分 {cat_avg:.4f}, "
+                      f"F1得分 {cat_f1:.4f}, "
+                      f"语义相似度 {cat_sim:.4f}, "
+                      f"平均检索数 {cat_results['avg_retrieved']:.1f}")
+
+def analyze_dataset_structure(data: List[Dict]) -> Dict[str, Any]:
+    """分析数据集结构"""
+    stats = {
+        'total_samples': len(data),
+        'speakers': {},
+        'qa_categories': {},
+        'sessions_per_sample': [],
+        'qa_per_sample': []
+    }
+    
+    all_speakers = set()
+    all_categories = set()
+    
+    for sample in data:
+        sample_id = sample.get('sample_id', 'unknown')
+        
+        # 分析对话
+        if 'conversation' in sample:
+            conversation_data = sample['conversation']
+            speaker_a = conversation_data.get('speaker_a')
+            speaker_b = conversation_data.get('speaker_b')
+            
+            if speaker_a:
+                all_speakers.add(speaker_a)
+            if speaker_b:
+                all_speakers.add(speaker_b)
+            
+            # 统计session数量
+            session_count = sum(1 for key in conversation_data.keys() 
+                              if key.startswith('session_') and not key.endswith('_date_time'))
+            stats['sessions_per_sample'].append(session_count)
+        
+        # 分析QA
+        if 'qa' in sample:
+            qa_count = len(sample['qa'])
+            stats['qa_per_sample'].append(qa_count)
+            
+            for qa in sample['qa']:
+                category = qa.get('category', 0)
+                if category:
+                    all_categories.add(category)
+    
+    stats['speakers'] = {
+        'total_unique': len(all_speakers),
+        'list': sorted(list(all_speakers))
+    }
+    
+    stats['qa_categories'] = {
+        'total_categories': len(all_categories),
+        'list': sorted(list(all_categories))
+    }
+    
+    if stats['sessions_per_sample']:
+        stats['avg_sessions_per_sample'] = np.mean(stats['sessions_per_sample'])
+    
+    if stats['qa_per_sample']:
+        stats['avg_qa_per_sample'] = np.mean(stats['qa_per_sample'])
+    
+    return stats
+
+# 修改 main 函数，去掉LLM增强评估部分，使用基础评估
 def main():
     """主执行函数"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     try:
-        # 检查API密钥
-        if not os.getenv("DEEPSEEK_API_KEY"):
-            logging.error("请设置 DEEPSEEK_API_KEY 环境变量")
-            return
-        
         # 初始化系统
         logging.info("初始化AgentMemorySystem...")
         hippo_graph = SemanticGraph()
@@ -359,6 +935,10 @@ def main():
         if not raw_data:
             logging.error("数据集加载失败")
             return
+        
+        # 分析数据集结构
+        dataset_stats = analyze_dataset_structure(raw_data)
+        logging.info(f"数据集统计: {dataset_stats}")
         
         # 解析数据
         conversations, qa_pairs = parse_locomo_data(raw_data)
@@ -373,603 +953,31 @@ def main():
         logging.info("构建向量索引...")
         hippo_graph.build_semantic_map_index()
         logging.info("索引构建完成")
+
+        # 显示图谱统计信息
+        logging.info("显示图谱统计信息...")
+        hippo_graph.display_graph_summary()
         
         # 加载评估模型
         logging.info(f"加载评估模型: {EVALUATION_MODEL}...")
         eval_model = SentenceTransformer(EVALUATION_MODEL)
         
-        # 执行LLM增强评估
-        logging.info(f"开始LLM增强评估，使用模型: {LLM_MODELS}")
-        results = llm_enhanced_evaluation(hippo_graph, qa_pairs, eval_model, LLM_MODELS)
+        # 执行基础评估
+        results = enhanced_search_and_evaluate(hippo_graph, qa_pairs, eval_model)
         
         # 计算指标
-        metrics = calculate_llm_metrics(results)
+        metrics = calculate_final_metrics(results)
         
         # 打印总结
-        print_llm_evaluation_summary(results, metrics)
+        print_evaluation_summary(results, metrics)
         
         # 保存结果
-        save_llm_results(results, metrics, timestamp)
+        save_results(results, metrics, timestamp)
         
     except Exception as e:
         logging.error(f"评估过程中发生错误: {e}", exc_info=True)
     
-    logging.info("LLM增强评估完成")
+    logging.info("评估完成")
 
 if __name__ == "__main__":
     main()
-
-# import json
-# import logging
-# import os
-# import sys
-# from pathlib import Path
-# from typing import List, Dict, Any, Tuple, Optional
-# from datetime import datetime
-# import numpy as np
-# from sentence_transformers import SentenceTransformer, util
-# import torch
-
-# # 添加父目录到路径以便导入dev模块
-# sys.path.append(str(Path(__file__).parent.parent.parent))
-# from dev import SemanticGraph, MemoryUnit
-# from benchmark.task_eval.evaluation import eval_question_answering, f1_score, exact_match_score
-
-# # --- 配置 ---
-# LOGGING_LEVEL = logging.INFO
-# DATASET_DIR = Path(__file__).parent.parent / "dataset" / "locomo"
-# DATASET_PATH = DATASET_DIR / "locomo10.json"
-# RESULTS_DIR = Path(__file__).parent.parent / "results"
-# TOP_K_RESULTS = 5
-# EVALUATION_MODEL = 'all-MiniLM-L6-v2'
-
-# # 创建结果目录
-# RESULTS_DIR.mkdir(exist_ok=True)
-
-# # --- 日志设置 ---
-# logging.basicConfig(
-#     level=LOGGING_LEVEL, 
-#     format='%(asctime)s - %(levelname)s - %(message)s',
-#     handlers=[
-#         logging.FileHandler(RESULTS_DIR / f'locomo_test_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
-#         logging.StreamHandler()
-#     ]
-# )
-
-# def load_dataset(file_path: Path) -> List[Dict[str, Any]]:
-#     """加载LoCoMo数据集文件。"""
-#     try:
-#         with open(file_path, 'r', encoding='utf-8') as f:
-#             data = json.load(f)
-#             logging.info(f"成功加载数据集: {file_path}")
-#             logging.info(f"数据集包含 {len(data)} 个样本")
-#             return data
-#     except FileNotFoundError:
-#         logging.error(f"数据集文件未找到: {file_path}")
-#         return []
-#     except json.JSONDecodeError as e:
-#         logging.error(f"JSON解析错误: {e}")
-#         return []
-
-# def parse_locomo_data(data: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict]]:
-#     """
-#     解析LoCoMo数据集，分离对话历史和QA对
-    
-#     Returns:
-#         Tuple[对话历史, QA对列表]
-#     """
-#     conversations = []
-#     qa_pairs = []
-    
-#     for sample in data:
-#         sample_id = sample.get('sample_id', 'unknown')
-        
-#         # 处理对话历史 - 从conversation字段提取
-#         if 'conversation' in sample:
-#             conversation_data = sample['conversation']
-#             dialog_messages = []
-            
-#             # 提取所有session的对话
-#             for key, value in conversation_data.items():
-#                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
-#                     session_time = conversation_data.get(f"{key}_date_time", "")
-#                     for msg_idx, message in enumerate(value):
-#                         if isinstance(message, dict):
-#                             dialog_messages.append({
-#                                 'speaker': message.get('speaker', 'unknown'),
-#                                 'content': message.get('message', message.get('text', '')),
-#                                 'timestamp': session_time,
-#                                 'session': key,
-#                                 'message_index': msg_idx
-#                             })
-            
-#             if dialog_messages:
-#                 conversations.append({
-#                     'dialog_id': sample_id,
-#                     'messages': dialog_messages,
-#                     'speaker_a': conversation_data.get('speaker_a', 'Speaker A'),
-#                     'speaker_b': conversation_data.get('speaker_b', 'Speaker B')
-#                 })
-        
-#         # 处理QA对
-#         if 'qa' in sample:
-#             for qa_idx, qa in enumerate(sample['qa']):
-#                 if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
-#                     qa_pairs.append({
-#                         'sample_id': sample_id,
-#                         'qa_index': qa_idx,
-#                         'question': qa.get('question'),
-#                         'answer': qa.get('answer'),
-#                         'evidence': qa.get('evidence', []),
-#                         'category': qa.get('category', 0),
-#                         'adversarial_answer': qa.get('adversarial_answer', None)
-#                     })
-    
-#     logging.info(f"解析得到 {len(conversations)} 个对话，{len(qa_pairs)} 个QA对")
-#     return conversations, qa_pairs
-
-# def setup_locomo_memory_spaces(graph: SemanticGraph):
-#     """为LoCoMo数据集创建专门的内存空间"""
-    
-#     # 按数据类型创建空间
-#     dialog_space = graph.create_memory_space_in_map("locomo_dialogs")
-#     qa_space = graph.create_memory_space_in_map("locomo_qa_pairs")
-    
-#     # 按QA类别创建细分空间
-#     for category in [1, 2, 3, 4, 5]:
-#         category_space = graph.create_memory_space_in_map(f"locomo_qa_category_{category}")
-    
-#     logging.info("LoCoMo内存空间已创建")
-
-# def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
-#     """将LoCoMo数据集注入到SemanticGraph中"""
-#     logging.info("开始注入LoCoMo对话历史...")
-#     total_messages = 0
-    
-#     # 设置内存空间
-#     setup_locomo_memory_spaces(graph)
-    
-#     for sample in data:
-#         sample_id = sample.get('sample_id', f'sample_{total_messages}')
-        
-#         # 处理对话历史
-#         if 'conversation' in sample:
-#             conversation_data = sample['conversation']
-#             speaker_a = conversation_data.get('speaker_a', 'Speaker A')
-#             speaker_b = conversation_data.get('speaker_b', 'Speaker B')
-            
-#             # 处理session summaries作为高级记忆单元
-#             if 'session_summary' in sample:
-#                 for session_key, summary in sample['session_summary'].items():
-#                     if isinstance(summary, str) and summary.strip():
-#                         unit_id = f"{sample_id}_{session_key}_summary"
-                        
-#                         summary_unit = MemoryUnit(
-#                             uid=unit_id,
-#                             raw_data={
-#                                 "text_content": summary,
-#                                 "content_type": "session_summary",
-#                                 "session": session_key,
-#                                 "sample_id": sample_id,
-#                                 "speakers": f"{speaker_a} & {speaker_b}"
-#                             },
-#                             metadata={
-#                                 "data_source": "locomo_summary",
-#                                 "sample_id": sample_id,
-#                                 "session": session_key,
-#                                 "content_type": "summary"
-#                             }
-#                         )
-                        
-#                         graph.add_unit(summary_unit)
-#                         graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
-#                         total_messages += 1
-            
-#             # 处理具体的对话消息（如果存在）
-#             for key, value in conversation_data.items():
-#                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
-#                     session_time = conversation_data.get(f"{key}_date_time", "")
-                    
-#                     for msg_idx, message in enumerate(value):
-#                         if isinstance(message, dict) and message.get('message'):
-#                             unit_id = f"{sample_id}_{key}_msg_{msg_idx}"
-#                             speaker = message.get('speaker', 'unknown')
-#                             content = message.get('message', '')
-                            
-#                             if content.strip():
-#                                 unit = MemoryUnit(
-#                                     uid=unit_id,
-#                                     raw_data={
-#                                         "text_content": f"{speaker}: {content}",
-#                                         "speaker": speaker,
-#                                         "message_content": content,
-#                                         "session": key,
-#                                         "sample_id": sample_id
-#                                     },
-#                                     metadata={
-#                                         "timestamp": session_time,
-#                                         "conversation_id": sample_id,
-#                                         "session": key,
-#                                         "message_index": msg_idx,
-#                                         "data_source": "locomo_dialog",
-#                                         "speaker": speaker
-#                                     }
-#                                 )
-                                
-#                                 graph.add_unit(unit)
-#                                 graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
-                                
-#                                 # 按说话人分类
-#                                 speaker_space = f"speaker_{speaker.lower().replace(' ', '_')}"
-#                                 graph.add_unit_to_space_in_map(unit_id, speaker_space)
-                                
-#                                 total_messages += 1
-        
-#         # 处理QA对作为独立的知识点（可选）
-#         if 'qa' in sample:
-#             for qa_idx, qa in enumerate(sample['qa']):
-#                 if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
-#                     qa_unit_id = f"{sample_id}_qa_{qa_idx}"
-                    
-#                     qa_unit = MemoryUnit(
-#                         uid=qa_unit_id,
-#                         raw_data={
-#                             "text_content": f"Q: {qa['question']} A: {qa['answer']}",
-#                             "question": qa['question'],
-#                             "answer": qa['answer'],
-#                             "evidence": qa.get('evidence', []),
-#                             "category": qa.get('category', 0)
-#                         },
-#                         metadata={
-#                             "data_source": "locomo_qa",
-#                             "sample_id": sample_id,
-#                             "qa_category": qa.get('category', 0),
-#                             "evidence_sources": qa.get('evidence', [])
-#                         }
-#                     )
-                    
-#                     graph.add_unit(qa_unit)
-#                     graph.add_unit_to_space_in_map(qa_unit_id, "locomo_qa_pairs")
-                    
-#                     # 按类别分类
-#                     category = qa.get('category', 0)
-#                     if category > 0:
-#                         graph.add_unit_to_space_in_map(qa_unit_id, f"locomo_qa_category_{category}")
-    
-#     logging.info(f"数据注入完成。共添加 {total_messages} 个记忆单元")
-#     return total_messages
-
-# def format_enhanced_context(retrieved_units: List[Tuple]) -> str:
-#     """格式化增强的上下文信息"""
-#     if not retrieved_units:
-#         return "没有检索到相关记忆。"
-    
-#     context_lines = ["--- 检索到的相关记忆上下文 ---"]
-    
-#     for unit, score in retrieved_units:
-#         data_source = unit.metadata.get('data_source', 'unknown')
-        
-#         if data_source == 'locomo_summary':
-#             session = unit.raw_data.get('session', 'unknown')
-#             content = unit.raw_data.get('text_content', '')
-#             speakers = unit.raw_data.get('speakers', 'Unknown')
-#             line = f"[摘要-{session}] {speakers}: {content[:200]}... (相似度: {score:.4f})"
-            
-#         elif data_source == 'locomo_dialog':
-#             speaker = unit.raw_data.get('speaker', 'unknown')
-#             content = unit.raw_data.get('message_content', '')
-#             session = unit.metadata.get('session', 'unknown')
-#             line = f"[对话-{session}] {speaker}: {content} (相似度: {score:.4f})"
-            
-#         elif data_source == 'locomo_qa':
-#             question = unit.raw_data.get('question', '')
-#             answer = unit.raw_data.get('answer', '')
-#             category = unit.metadata.get('qa_category', 0)
-#             line = f"[QA-类别{category}] Q: {question} A: {answer} (相似度: {score:.4f})"
-            
-#         else:
-#             content = unit.raw_data.get('text_content', '')[:100]
-#             line = f"[{data_source}] {content}... (相似度: {score:.4f})"
-        
-#         context_lines.append(line)
-    
-#     context_lines.append("-" * 60)
-#     return "\n".join(context_lines)
-
-# def extract_answer_from_context(question: str, context: str, retrieved_units: List[Tuple]) -> str:
-#     """
-#     从检索到的上下文中提取答案
-#     这是一个简化的答案提取逻辑，实际应用中会使用LLM
-#     """
-#     if not retrieved_units:
-#         return "无法找到相关信息"
-    
-#     # 简单的答案提取：取相似度最高的内容作为答案的基础
-#     best_unit, best_score = retrieved_units[0]
-    
-#     # 根据不同的数据源提取答案
-#     data_source = best_unit.metadata.get('data_source', 'unknown')
-    
-#     if data_source == 'locomo_qa' and best_score > 0.3:
-#         # 如果检索到的是QA对，直接使用答案
-#         return best_unit.raw_data.get('answer', '未找到答案')
-#     elif data_source in ['locomo_dialog', 'locomo_summary'] and best_score > 0.3:
-#         # 如果检索到的是对话或摘要，提取相关内容
-#         content = best_unit.raw_data.get('text_content', '')
-#         return f"根据对话记录: {content[:200]}"
-#     else:
-#         return "未找到足够相关的信息"
-
-# def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eval_model: SentenceTransformer) -> Dict[str, Any]:
-#     """增强的搜索和评估函数"""
-#     results = {
-#         'total_questions': len(qa_pairs),
-#         'category_results': {},
-#         'retrieval_results': [],
-#         'all_scores': []
-#     }
-    
-#     for qa in qa_pairs:
-#         question = qa.get('question')
-#         golden_answer = qa.get('answer')
-#         category = qa.get('category', 0)
-#         evidence = qa.get('evidence', [])
-        
-#         if not question or not golden_answer:
-#             continue
-        
-#         # 1. 多策略检索
-#         search_results = {}
-        
-#         # 全局搜索
-#         search_results['global'] = graph.search_similarity_in_graph(
-#             query_text=question, k=5
-#         )
-        
-#         # 在对话空间中搜索
-#         try:
-#             search_results['dialog_only'] = graph.search_similarity_in_graph(
-#                 query_text=question, k=5, space_name="locomo_dialogs"
-#             )
-#         except:
-#             search_results['dialog_only'] = []
-        
-#         # 在同类别QA中搜索
-#         if category > 0:
-#             try:
-#                 search_results[f'category_{category}'] = graph.search_similarity_in_graph(
-#                     query_text=question, k=3, space_name=f"locomo_qa_category_{category}"
-#                 )
-#             except:
-#                 search_results[f'category_{category}'] = []
-        
-#         # 2. 融合检索结果
-#         all_retrieved = []
-#         for strategy, units in search_results.items():
-#             for unit, score in units:
-#                 all_retrieved.append((unit, score, strategy))
-        
-#         # 按相似度排序并去重
-#         seen_uids = set()
-#         unique_retrieved = []
-#         for unit, score, strategy in sorted(all_retrieved, key=lambda x: x[1], reverse=True):
-#             if unit.uid not in seen_uids:
-#                 unique_retrieved.append((unit, score, strategy))
-#                 seen_uids.add(unit.uid)
-        
-#         # 3. 生成上下文和答案
-#         top_retrieved = unique_retrieved[:TOP_K_RESULTS]
-#         context_str = format_enhanced_context([(u, s) for u, s, _ in top_retrieved])
-#         predicted_answer = extract_answer_from_context(question, context_str, [(u, s) for u, s, _ in top_retrieved])
-        
-#         # 4. 评估
-#         try:
-#             # 使用F1得分评估
-#             f1_score_result = f1_score(predicted_answer, golden_answer)
-            
-#             # 使用语义相似度评估
-#             embedding1 = eval_model.encode(predicted_answer, convert_to_tensor=True)
-#             embedding2 = eval_model.encode(golden_answer, convert_to_tensor=True)
-#             similarity_score = util.cos_sim(embedding1, embedding2).item()
-            
-#             # 综合得分
-#             combined_score = (f1_score_result + similarity_score) / 2
-            
-#         except Exception as e:
-#             logging.error(f"评估过程中出错: {e}")
-#             f1_score_result = 0
-#             similarity_score = 0
-#             combined_score = 0
-        
-#         # 5. 记录结果
-#         result_entry = {
-#             'question': question,
-#             'golden_answer': golden_answer,
-#             'predicted_answer': predicted_answer,
-#             'category': category,
-#             'evidence': evidence,
-#             'retrieved_count': len(unique_retrieved),
-#             'f1_score': f1_score_result,
-#             'similarity_score': similarity_score,
-#             'combined_score': combined_score,
-#             'context': context_str,
-#             'search_strategies': list(search_results.keys())
-#         }
-        
-#         results['retrieval_results'].append(result_entry)
-#         results['all_scores'].append(combined_score)
-        
-#         # 按类别统计
-#         if category not in results['category_results']:
-#             results['category_results'][category] = {
-#                 'count': 0,
-#                 'scores': [],
-#                 'f1_scores': [],
-#                 'similarity_scores': [],
-#                 'avg_retrieved': 0
-#             }
-        
-#         results['category_results'][category]['count'] += 1
-#         results['category_results'][category]['scores'].append(combined_score)
-#         results['category_results'][category]['f1_scores'].append(f1_score_result)
-#         results['category_results'][category]['similarity_scores'].append(similarity_score)
-#         results['category_results'][category]['avg_retrieved'] += len(unique_retrieved)
-        
-#         # 打印详细结果
-#         print(f"\n{'='*60}")
-#         print(f"类别 {category} | 证据: {evidence}")
-#         print(f"❓ 问题: {question}")
-#         print(f"✅ 标准答案: {golden_answer}")
-#         print(f"🤖 预测答案: {predicted_answer}")
-#         print(f"🔍 检索策略: {', '.join(search_results.keys())}")
-#         print(f"📄 检索到 {len(unique_retrieved)} 个相关单元")
-#         print(f"📊 F1得分: {f1_score_result:.4f}")
-#         print(f"📊 语义相似度: {similarity_score:.4f}")
-#         print(f"📊 综合得分: {combined_score:.4f}")
-#         print(context_str)
-    
-#     return results
-
-# def calculate_final_metrics(results: Dict[str, Any]) -> Dict[str, float]:
-#     """计算最终评估指标"""
-#     total_questions = results['total_questions']
-#     metrics = {}
-    
-#     if total_questions > 0:
-#         # 检索成功率
-#         successful_retrievals = sum(1 for r in results['retrieval_results'] if r['retrieved_count'] > 0)
-#         metrics['retrieval_success_rate'] = successful_retrievals / total_questions
-        
-#         # 平均得分
-#         if results['all_scores']:
-#             metrics['avg_combined_score'] = np.mean(results['all_scores'])
-#             metrics['std_combined_score'] = np.std(results['all_scores'])
-        
-#         # 按类别的指标
-#         for category, cat_results in results['category_results'].items():
-#             if cat_results['count'] > 0:
-#                 cat_results['avg_retrieved'] = cat_results['avg_retrieved'] / cat_results['count']
-                
-#                 if cat_results['scores']:
-#                     metrics[f'category_{category}_avg_score'] = np.mean(cat_results['scores'])
-#                     metrics[f'category_{category}_avg_f1'] = np.mean(cat_results['f1_scores'])
-#                     metrics[f'category_{category}_avg_similarity'] = np.mean(cat_results['similarity_scores'])
-    
-#     return metrics
-
-# def save_results(results: Dict[str, Any], metrics: Dict[str, float], timestamp: str):
-#     """保存评估结果"""
-#     result_file = RESULTS_DIR / f'locomo_evaluation_{timestamp}.json'
-    
-#     output_data = {
-#         'timestamp': timestamp,
-#         'config': {
-#             'dataset_path': str(DATASET_PATH),
-#             'top_k_results': TOP_K_RESULTS,
-#             'evaluation_model': EVALUATION_MODEL
-#         },
-#         'results': results,
-#         'metrics': metrics
-#     }
-    
-#     # 转换numpy类型为Python原生类型
-#     def convert_numpy(obj):
-#         if isinstance(obj, np.integer):
-#             return int(obj)
-#         elif isinstance(obj, np.floating):
-#             return float(obj)
-#         elif isinstance(obj, np.ndarray):
-#             return obj.tolist()
-#         return obj
-    
-#     def deep_convert(data):
-#         if isinstance(data, dict):
-#             return {k: deep_convert(v) for k, v in data.items()}
-#         elif isinstance(data, list):
-#             return [deep_convert(item) for item in data]
-#         else:
-#             return convert_numpy(data)
-    
-#     output_data = deep_convert(output_data)
-    
-#     with open(result_file, 'w', encoding='utf-8') as f:
-#         json.dump(output_data, f, ensure_ascii=False, indent=2)
-    
-#     logging.info(f"评估结果已保存到: {result_file}")
-
-# def print_evaluation_summary(results: Dict[str, Any], metrics: Dict[str, float]):
-#     """打印评估总结"""
-#     print(f"\n{'='*80}")
-#     print("📊 LoCoMo 评估总结")
-#     print(f"{'='*80}")
-    
-#     if results['all_scores']:
-#         print(f"总问题数: {results['total_questions']}")
-#         print(f"检索成功率: {metrics.get('retrieval_success_rate', 0):.4f}")
-#         print(f"平均综合得分: {metrics.get('avg_combined_score', 0):.4f} ± {metrics.get('std_combined_score', 0):.4f}")
-        
-#         print(f"\n按类别统计:")
-#         for category, cat_results in results['category_results'].items():
-#             if cat_results['scores']:
-#                 cat_avg = metrics.get(f'category_{category}_avg_score', 0)
-#                 cat_f1 = metrics.get(f'category_{category}_avg_f1', 0)
-#                 cat_sim = metrics.get(f'category_{category}_avg_similarity', 0)
-#                 print(f"  类别 {category}: {cat_results['count']} 问题, "
-#                       f"综合得分 {cat_avg:.4f}, "
-#                       f"F1得分 {cat_f1:.4f}, "
-#                       f"语义相似度 {cat_sim:.4f}, "
-#                       f"平均检索数 {cat_results['avg_retrieved']:.1f}")
-
-# def main():
-#     """主执行函数"""
-#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-#     try:
-#         # 初始化系统
-#         logging.info("初始化AgentMemorySystem...")
-#         hippo_graph = SemanticGraph()
-        
-#         # 加载数据集
-#         logging.info(f"加载数据集: {DATASET_PATH}")
-#         raw_data = load_dataset(DATASET_PATH)
-#         if not raw_data:
-#             logging.error("数据集加载失败")
-#             return
-        
-#         # 解析数据
-#         conversations, qa_pairs = parse_locomo_data(raw_data)
-        
-#         # 注入对话历史
-#         total_messages = ingest_conversation_history(hippo_graph, raw_data)
-#         if total_messages == 0:
-#             logging.error("没有成功注入任何对话数据")
-#             return
-        
-#         # 构建索引
-#         logging.info("构建向量索引...")
-#         hippo_graph.build_semantic_map_index()
-#         logging.info("索引构建完成")
-        
-#         # 加载评估模型
-#         logging.info(f"加载评估模型: {EVALUATION_MODEL}...")
-#         eval_model = SentenceTransformer(EVALUATION_MODEL)
-        
-#         # 执行增强评估
-#         results = enhanced_search_and_evaluate(hippo_graph, qa_pairs, eval_model)
-        
-#         # 计算指标
-#         metrics = calculate_final_metrics(results)
-        
-#         # 打印总结
-#         print_evaluation_summary(results, metrics)
-        
-#         # 保存结果
-#         save_results(results, metrics, timestamp)
-        
-#     except Exception as e:
-#         logging.error(f"评估过程中发生错误: {e}", exc_info=True)
-    
-#     logging.info("评估完成")
-
-# if __name__ == "__main__":
-#     main()

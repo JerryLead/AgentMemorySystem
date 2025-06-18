@@ -5,3 +5,5 @@ __pycache__/
 *$py.class
 outdate/
 */dataset/
+*/results/
+benchmark/scripts/env.sh

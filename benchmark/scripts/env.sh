@@ -18,8 +18,8 @@ export SESS_SUMM_OUTPUT_FILE=locomo10_session_summary.json
 export PROMPT_DIR=./prompt_examples
 
 # API Keys
-export DEEPSEEK_API_KEY="your_deepseek_api_key_here"
-export OPENAI_API_KEY="your_openai_api_key_here"
+export DEEPSEEK_API_KEY="sk-9b1eb64108e445748d3c1507d0c680e8"
+export OPENAI_API_KEY="sk-6sHGDGJOyO5gagpZLj218K6Tbt7a2loAEC1ZBgrBJEbm6WYg"
 
 # 模型配置
 export DEFAULT_LLM_MODEL="deepseek-chat"
