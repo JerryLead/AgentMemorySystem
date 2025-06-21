@@ -946,71 +946,80 @@ def analyze_dataset_structure(data: List[Dict]) -> Dict[str, Any]:
 
 # 修改 main 函数，去掉LLM增强评估部分，使用基础评估
 def main():
-    """主执行函数"""
+    """主执行函数（按 sample_id 分组逐个评测）"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
     try:
         # 初始化系统
         logging.info("初始化AgentMemorySystem...")
-        hippo_graph = SemanticGraph()
-        
+
         # 加载数据集
         logging.info(f"加载数据集: {DATASET_PATH}")
         raw_data = load_dataset(DATASET_PATH)
         if not raw_data:
             logging.error("数据集加载失败")
             return
-        
-        # 分析数据集结构
-        dataset_stats = analyze_dataset_structure(raw_data)
-        logging.info(f"数据集统计: {dataset_stats}")
-        
-        # 解析数据
-        memory_unit = parse_locomo_data(raw_data)
 
-        # 新增：提取QA对
-        qa_pairs = []
-        for sample in raw_data:
+        # 分组：sample_id -> sample
+        sample_map = {sample.get('sample_id', f'sample_{i}'): sample for i, sample in enumerate(raw_data)}
+        all_sample_ids = list(sample_map.keys())
+        logging.info(f"共检测到 {len(all_sample_ids)} 个 sample_id: {all_sample_ids}")
+
+        # 逐个 sample_id 测试
+        for sample_id in all_sample_ids:
+            logging.info(f"\n{'='*40}\n开始评测 sample_id: {sample_id}\n{'='*40}")
+            sample = sample_map[sample_id]
+            # 只处理当前 sample
+            sample_data = [sample]
+
+            # 分析结构
+            dataset_stats = analyze_dataset_structure(sample_data)
+            logging.info(f"sample_id={sample_id} 结构统计: {dataset_stats}")
+
+            # 解析数据
+            memory_unit = parse_locomo_data(sample_data)
+
+            # 提取QA对
+            qa_pairs = []
             if 'qa' in sample:
                 for qa in sample['qa']:
                     if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
                         qa_pairs.append(qa)
-        
-        # 注入对话历史
-        total_messages = ingest_conversation_history(hippo_graph, raw_data)
-        if total_messages == 0:
-            logging.error("没有成功注入任何对话数据")
-            return
-        
-        # 构建索引
-        logging.info("构建向量索引...")
-        hippo_graph.build_semantic_map_index()
-        logging.info("索引构建完成")
 
-        # 显示图谱统计信息
-        logging.info("显示图谱统计信息...")
-        hippo_graph.display_graph_summary()
-        
-        # 加载评估模型
-        logging.info(f"加载评估模型: {EVALUATION_MODEL}...")
-        eval_model = SentenceTransformer(EVALUATION_MODEL)
-        
-        # 执行基础评估
-        results = enhanced_search_and_evaluate(hippo_graph, qa_pairs, eval_model)
-        
-        # 计算指标
-        metrics = calculate_final_metrics(results)
-        
-        # 打印总结
-        print_evaluation_summary(results, metrics)
-        
-        # 保存结果
-        save_results(results, metrics, timestamp)
-        
+            # 初始化图谱
+            hippo_graph = SemanticGraph()
+            total_messages = ingest_conversation_history(hippo_graph, sample_data)
+            if total_messages == 0:
+                logging.warning(f"sample_id={sample_id} 没有成功注入任何对话数据")
+                continue
+
+            # 构建索引
+            logging.info("构建向量索引...")
+            hippo_graph.build_semantic_map_index()
+            logging.info("索引构建完成")
+
+            # 显示图谱统计信息
+            hippo_graph.display_graph_summary()
+
+            # 加载评估模型
+            logging.info(f"加载评估模型: {EVALUATION_MODEL}...")
+            eval_model = SentenceTransformer(EVALUATION_MODEL)
+
+            # 执行基础评估
+            results = enhanced_search_and_evaluate(hippo_graph, qa_pairs, eval_model)
+
+            # 计算指标
+            metrics = calculate_final_metrics(results)
+
+            # 打印总结
+            print_evaluation_summary(results, metrics)
+
+            # 保存结果（每个 sample_id 单独保存）
+            save_results(results, metrics, f"{sample_id}_{timestamp}")
+
     except Exception as e:
         logging.error(f"评估过程中发生错误: {e}", exc_info=True)
-    
-    logging.info("评估完成")
+
+    logging.info("全部评估完成")
 
 if __name__ == "__main__":
     main()
