@@ -26,6 +26,7 @@ EVALUATION_MODEL = 'all-MiniLM-L6-v2'
 # LLM配置
 LLM_MODELS = [
     "deepseek-chat",
+
     # "gpt-3.5-turbo",
     # "gpt-4",
     # 可以添加更多模型
@@ -356,80 +357,155 @@ def load_dataset(file_path: Path) -> List[Dict[str, Any]]:
         logging.error(f"JSON解析错误: {e}")
         return []
 
-def parse_locomo_data(data: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict]]:
-    """
-    解析LoCoMo数据集，分离对话历史和QA对
+# def parse_locomo_data(data: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict]]:
+#     """
+#     解析LoCoMo数据集，分离对话历史和QA对
     
-    Returns:
-        Tuple[对话历史, QA对列表]
-    """
-    conversations = []
-    qa_pairs = []
+#     Returns:
+#         Tuple[对话历史, QA对列表]
+#     """
+#     conversations = []
+#     qa_pairs = []
     
+#     for sample in data:
+#         sample_id = sample.get('sample_id', 'unknown')
+        
+#         # 处理对话历史 - 从conversation字段提取
+#         if 'conversation' in sample:
+#             conversation_data = sample['conversation']
+#             dialog_messages = []
+            
+#             # 提取所有session的对话
+#             for key, value in conversation_data.items():
+#                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+#                     session_time = conversation_data.get(f"{key}_date_time", "")
+#                     for msg_idx, message in enumerate(value):
+#                         if isinstance(message, dict):
+#                             dialog_messages.append({
+#                                 'speaker': message.get('speaker', 'unknown'),
+#                                 'content': message.get('message', message.get('text', '')),
+#                                 'timestamp': session_time,
+#                                 'session': key,
+#                                 'message_index': msg_idx
+#                             })
+            
+#             if dialog_messages:
+#                 conversations.append({
+#                     'dialog_id': sample_id,
+#                     'messages': dialog_messages,
+#                     'speaker_a': conversation_data.get('speaker_a', 'Speaker A'),
+#                     'speaker_b': conversation_data.get('speaker_b', 'Speaker B')
+#                 })
+        
+#         # 处理QA对
+#         if 'qa' in sample:
+#             for qa_idx, qa in enumerate(sample['qa']):
+#                 if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
+#                     qa_pairs.append({
+#                         'sample_id': sample_id,
+#                         'qa_index': qa_idx,
+#                         'question': qa.get('question'),
+#                         'answer': qa.get('answer'),
+#                         'evidence': qa.get('evidence', []),
+#                         'category': qa.get('category', 0),
+#                         'adversarial_answer': qa.get('adversarial_answer', None)
+#                     })
+    
+#     logging.info(f"解析得到 {len(conversations)} 个对话，{len(qa_pairs)} 个QA对")
+#     return conversations, qa_pairs
+
+def parse_locomo_data(data: List[Dict[str, Any]]) -> List[Dict]:
+    """
+    解析LoCoMo数据集，仅提取对话、event_summary、observation等记忆单元（不返回QA）。
+    返回所有对话消息、event_summary、observation的列表，每条为一个dict。
+    """
+    memory_units = []
     for sample in data:
         sample_id = sample.get('sample_id', 'unknown')
-        
-        # 处理对话历史 - 从conversation字段提取
+
+        # 处理对话消息
         if 'conversation' in sample:
             conversation_data = sample['conversation']
-            dialog_messages = []
-            
-            # 提取所有session的对话
             for key, value in conversation_data.items():
                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
                     session_time = conversation_data.get(f"{key}_date_time", "")
                     for msg_idx, message in enumerate(value):
                         if isinstance(message, dict):
-                            dialog_messages.append({
-                                'speaker': message.get('speaker', 'unknown'),
-                                'content': message.get('message', message.get('text', '')),
-                                'timestamp': session_time,
+                            memory_units.append({
+                                'type': 'dialog',
+                                'sample_id': sample_id,
                                 'session': key,
-                                'message_index': msg_idx
+                                'session_time': session_time,
+                                'message_index': msg_idx,
+                                'speaker': message.get('speaker', 'unknown'),
+                                'content': message.get('message', message.get('text', ''))
                             })
-            
-            if dialog_messages:
-                conversations.append({
-                    'dialog_id': sample_id,
-                    'messages': dialog_messages,
-                    'speaker_a': conversation_data.get('speaker_a', 'Speaker A'),
-                    'speaker_b': conversation_data.get('speaker_b', 'Speaker B')
+
+        # 处理 event_summary
+        if 'event_summary' in sample:
+            for ev_key, ev in sample['event_summary'].items():
+                memory_units.append({
+                    'type': 'event_summary',
+                    'sample_id': sample_id,
+                    'event_key': ev_key,
+                    'event': ev
                 })
-        
-        # 处理QA对
-        if 'qa' in sample:
-            for qa_idx, qa in enumerate(sample['qa']):
-                if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
-                    qa_pairs.append({
-                        'sample_id': sample_id,
-                        'qa_index': qa_idx,
-                        'question': qa.get('question'),
-                        'answer': qa.get('answer'),
-                        'evidence': qa.get('evidence', []),
-                        'category': qa.get('category', 0),
-                        'adversarial_answer': qa.get('adversarial_answer', None)
-                    })
+
+        # 处理 observation
+        if 'observation' in sample:
+            for ob_key, ob in sample['observation'].items():
+                memory_units.append({
+                    'type': 'observation',
+                    'sample_id': sample_id,
+                    'observation_key': ob_key,
+                    'observation': ob
+                })
+
+        # 处理 session_summary
+        if 'session_summary' in sample:
+            for ss_key, ss in sample['session_summary'].items():
+                memory_units.append({
+                    'type': 'session_summary',
+                    'sample_id': sample_id,
+                    'session_summary_key': ss_key,
+                    'summary': ss
+                })
+
+    return memory_units
+
+# def extract_all_speakers(data: List[Dict]) -> List[str]:
+#     """从数据集中提取所有说话人"""
+#     speakers = set()
     
-    logging.info(f"解析得到 {len(conversations)} 个对话，{len(qa_pairs)} 个QA对")
-    return conversations, qa_pairs
+#     for sample in data:
+#         if 'conversation' in sample:
+#             conversation_data = sample['conversation']
+            
+#             # 提取 speaker_a 和 speaker_b
+#             speaker_a = conversation_data.get('speaker_a')
+#             speaker_b = conversation_data.get('speaker_b')
+#             if speaker_a:
+#                 speakers.add(speaker_a.lower())
+#             if speaker_b:
+#                 speakers.add(speaker_b.lower())
+            
+#             # 从具体对话消息中提取说话人
+#             for key, value in conversation_data.items():
+#                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+#                     for message in value:
+#                         if isinstance(message, dict):
+#                             speaker = message.get('speaker')
+#                             if speaker:
+#                                 speakers.add(speaker.lower())
+    
+#     return sorted(list(speakers))
 
 def extract_all_speakers(data: List[Dict]) -> List[str]:
-    """从数据集中提取所有说话人"""
+    """从所有对话消息中提取说话人（不依赖QA）"""
     speakers = set()
-    
     for sample in data:
         if 'conversation' in sample:
             conversation_data = sample['conversation']
-            
-            # 提取 speaker_a 和 speaker_b
-            speaker_a = conversation_data.get('speaker_a')
-            speaker_b = conversation_data.get('speaker_b')
-            if speaker_a:
-                speakers.add(speaker_a.lower())
-            if speaker_b:
-                speakers.add(speaker_b.lower())
-            
-            # 从具体对话消息中提取说话人
             for key, value in conversation_data.items():
                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
                     for message in value:
@@ -437,84 +513,256 @@ def extract_all_speakers(data: List[Dict]) -> List[str]:
                             speaker = message.get('speaker')
                             if speaker:
                                 speakers.add(speaker.lower())
-    
     return sorted(list(speakers))
 
 def setup_locomo_memory_spaces(graph: SemanticGraph, data: List[Dict]):
-    """为LoCoMo数据集创建专门的内存空间"""
-    
-    # 按数据类型创建空间
-    dialog_space = graph.create_memory_space_in_map("locomo_dialogs")
-    qa_space = graph.create_memory_space_in_map("locomo_qa_pairs")
-    
-    # 按QA类别创建细分空间
-    for category in [1, 2, 3, 4, 5]:
-        category_space = graph.create_memory_space_in_map(f"locomo_qa_category_{category}")
-    
-    # 动态提取说话人并创建空间
+    graph.create_memory_space_in_map("locomo_dialogs")
+    for sample in data:
+        sample_id = sample.get('sample_id', 'unknown')
+        graph.create_memory_space_in_map(f"session_summary_{sample_id}")
+        graph.create_memory_space_in_map(f"event_summary_{sample_id}")
+        graph.create_memory_space_in_map(f"observation_{sample_id}")
+        # 为每个session建空间
+        if 'conversation' in sample:
+            for key in sample['conversation']:
+                if key.startswith('session_') and not key.endswith('_date_time'):
+                    graph.create_memory_space_in_map(f"session_{sample_id}_{key}")
+    # 说话人空间
     speakers = extract_all_speakers(data)
-    logging.info(f"发现 {len(speakers)} 个说话人: {speakers}")
-    
     for speaker in speakers:
-        speaker_space = graph.create_memory_space_in_map(f"speaker_{speaker}")
+        graph.create_memory_space_in_map(f"speaker_{speaker}")
+    # QA空间
+    graph.create_memory_space_in_map("locomo_qa_pairs")
+    for category in [1, 2, 3, 4, 5]:
+        graph.create_memory_space_in_map(f"locomo_qa_category_{category}")
+
+# def setup_locomo_memory_spaces(graph: SemanticGraph, data: List[Dict]):
+#     """为LoCoMo数据集创建专门的内存空间"""
     
-    logging.info("LoCoMo内存空间已创建")
+#     # 按数据类型创建空间
+#     dialog_space = graph.create_memory_space_in_map("locomo_dialogs")
+#     qa_space = graph.create_memory_space_in_map("locomo_qa_pairs")
+    
+#     # 按QA类别创建细分空间
+#     for category in [1, 2, 3, 4, 5]:
+#         category_space = graph.create_memory_space_in_map(f"locomo_qa_category_{category}")
+    
+#     # 动态提取说话人并创建空间
+#     speakers = extract_all_speakers(data)
+#     logging.info(f"发现 {len(speakers)} 个说话人: {speakers}")
+    
+#     for speaker in speakers:
+#         speaker_space = graph.create_memory_space_in_map(f"speaker_{speaker}")
+    
+#     logging.info("LoCoMo内存空间已创建")
+
+# def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
+#     """将LoCoMo数据集注入到SemanticGraph中"""
+#     logging.info("开始注入LoCoMo对话历史...")
+#     total_messages = 0
+    
+#     # 设置内存空间（传入数据以动态提取说话人）
+#     setup_locomo_memory_spaces(graph, data)
+    
+#     for sample in data:
+#         sample_id = sample.get('sample_id', f'sample_{total_messages}')
+        
+#         # 处理对话历史
+#         if 'conversation' in sample:
+#             conversation_data = sample['conversation']
+#             speaker_a = conversation_data.get('speaker_a', 'Speaker A')
+#             speaker_b = conversation_data.get('speaker_b', 'Speaker B')
+            
+#             # 处理session summaries作为高级记忆单元
+#             if 'session_summary' in sample:
+#                 for session_key, summary in sample['session_summary'].items():
+#                     if isinstance(summary, str) and summary.strip():
+#                         unit_id = f"{sample_id}_{session_key}_summary"
+                        
+#                         summary_unit = MemoryUnit(
+#                             uid=unit_id,
+#                             raw_data={
+#                                 "text_content": summary,
+#                                 "content_type": "session_summary",
+#                                 "session": session_key,
+#                                 "sample_id": sample_id,
+#                                 "speakers": f"{speaker_a} & {speaker_b}"
+#                             },
+#                             metadata={
+#                                 "data_source": "locomo_summary",
+#                                 "sample_id": sample_id,
+#                                 "session": session_key,
+#                                 "content_type": "summary"
+#                             }
+#                         )
+                        
+#                         graph.add_unit(summary_unit)
+#                         graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
+#                         total_messages += 1
+            
+#             # 处理具体的对话消息（如果存在）
+#             for key, value in conversation_data.items():
+#                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
+#                     session_time = conversation_data.get(f"{key}_date_time", "")
+                    
+#                     for msg_idx, message in enumerate(value):
+#                         if isinstance(message, dict) and message.get('message'):
+#                             unit_id = f"{sample_id}_{key}_msg_{msg_idx}"
+#                             speaker = message.get('speaker', 'unknown')
+#                             content = message.get('message', '')
+                            
+#                             if content.strip():
+#                                 unit = MemoryUnit(
+#                                     uid=unit_id,
+#                                     raw_data={
+#                                         "text_content": f"{speaker}: {content}",
+#                                         "speaker": speaker,
+#                                         "message_content": content,
+#                                         "session": key,
+#                                         "sample_id": sample_id
+#                                     },
+#                                     metadata={
+#                                         "timestamp": session_time,
+#                                         "conversation_id": sample_id,
+#                                         "session": key,
+#                                         "message_index": msg_idx,
+#                                         "data_source": "locomo_dialog",
+#                                         "speaker": speaker
+#                                     }
+#                                 )
+                                
+#                                 graph.add_unit(unit)
+#                                 graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
+                                
+#                                 # 按说话人分类
+#                                 speaker_space = f"speaker_{speaker.lower().replace(' ', '_')}"
+#                                 graph.add_unit_to_space_in_map(unit_id, speaker_space)
+                                
+#                                 total_messages += 1
+        
+#         # 处理QA对作为独立的知识点（可选，用于参考）
+#         if 'qa' in sample:
+#             for qa_idx, qa in enumerate(sample['qa']):
+#                 if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
+#                     qa_unit_id = f"{sample_id}_qa_{qa_idx}"
+                    
+#                     qa_unit = MemoryUnit(
+#                         uid=qa_unit_id,
+#                         raw_data={
+#                             "text_content": f"Q: {qa['question']} A: {qa['answer']}",
+#                             "question": qa['question'],
+#                             "answer": qa['answer'],
+#                             "evidence": qa.get('evidence', []),
+#                             "category": qa.get('category', 0)
+#                         },
+#                         metadata={
+#                             "data_source": "locomo_qa",
+#                             "sample_id": sample_id,
+#                             "qa_category": qa.get('category', 0),
+#                             "evidence_sources": qa.get('evidence', [])
+#                         }
+#                     )
+                    
+#                     graph.add_unit(qa_unit)
+#                     graph.add_unit_to_space_in_map(qa_unit_id, "locomo_qa_pairs")
+                    
+#                     # 按类别分类
+#                     category = qa.get('category', 0)
+#                     if category > 0:
+#                         graph.add_unit_to_space_in_map(qa_unit_id, f"locomo_qa_category_{category}")
+    
+#     logging.info(f"数据注入完成。共添加 {total_messages} 个记忆单元")
+#     return total_messages
 
 def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
-    """将LoCoMo数据集注入到SemanticGraph中"""
     logging.info("开始注入LoCoMo对话历史...")
     total_messages = 0
-    
-    # 设置内存空间（传入数据以动态提取说话人）
     setup_locomo_memory_spaces(graph, data)
-    
+
     for sample in data:
         sample_id = sample.get('sample_id', f'sample_{total_messages}')
-        
-        # 处理对话历史
+
+        # 处理session_summary
+        if 'session_summary' in sample:
+            for session_key, summary in sample['session_summary'].items():
+                if isinstance(summary, str) and summary.strip():
+                    unit_id = f"{sample_id}_{session_key}_summary"
+                    summary_unit = MemoryUnit(
+                        uid=unit_id,
+                        raw_data={
+                            "text_content": summary,
+                            "content_type": "session_summary",
+                            "session": session_key,
+                            "sample_id": sample_id
+                        },
+                        metadata={
+                            "data_source": "locomo_summary",
+                            "sample_id": sample_id,
+                            "session": session_key,
+                            "content_type": "summary"
+                        }
+                    )
+                    graph.add_unit(summary_unit)
+                    graph.add_unit_to_space_in_map(unit_id, f"session_summary_{sample_id}")
+                    total_messages += 1
+
+        # 处理event_summary
+        if 'event_summary' in sample:
+            for ev_key, ev in sample['event_summary'].items():
+                unit_id = f"{sample_id}_event_{ev_key}"
+                event_unit = MemoryUnit(
+                    uid=unit_id,
+                    raw_data={
+                        "text_content": ev,
+                        "content_type": "event_summary",
+                        "event_key": ev_key,
+                        "sample_id": sample_id
+                    },
+                    metadata={
+                        "data_source": "locomo_event_summary",
+                        "sample_id": sample_id,
+                        "event_key": ev_key,
+                        "content_type": "event_summary"
+                    }
+                )
+                graph.add_unit(event_unit)
+                graph.add_unit_to_space_in_map(unit_id, f"event_summary_{sample_id}")
+                total_messages += 1
+
+        # 处理observation
+        if 'observation' in sample:
+            for ob_key, ob in sample['observation'].items():
+                unit_id = f"{sample_id}_observation_{ob_key}"
+                obs_unit = MemoryUnit(
+                    uid=unit_id,
+                    raw_data={
+                        "text_content": ob,
+                        "content_type": "observation",
+                        "observation_key": ob_key,
+                        "sample_id": sample_id
+                    },
+                    metadata={
+                        "data_source": "locomo_observation",
+                        "sample_id": sample_id,
+                        "observation_key": ob_key,
+                        "content_type": "observation"
+                    }
+                )
+                graph.add_unit(obs_unit)
+                graph.add_unit_to_space_in_map(unit_id, f"observation_{sample_id}")
+                total_messages += 1
+
+        # 处理对话消息
         if 'conversation' in sample:
             conversation_data = sample['conversation']
-            speaker_a = conversation_data.get('speaker_a', 'Speaker A')
-            speaker_b = conversation_data.get('speaker_b', 'Speaker B')
-            
-            # 处理session summaries作为高级记忆单元
-            if 'session_summary' in sample:
-                for session_key, summary in sample['session_summary'].items():
-                    if isinstance(summary, str) and summary.strip():
-                        unit_id = f"{sample_id}_{session_key}_summary"
-                        
-                        summary_unit = MemoryUnit(
-                            uid=unit_id,
-                            raw_data={
-                                "text_content": summary,
-                                "content_type": "session_summary",
-                                "session": session_key,
-                                "sample_id": sample_id,
-                                "speakers": f"{speaker_a} & {speaker_b}"
-                            },
-                            metadata={
-                                "data_source": "locomo_summary",
-                                "sample_id": sample_id,
-                                "session": session_key,
-                                "content_type": "summary"
-                            }
-                        )
-                        
-                        graph.add_unit(summary_unit)
-                        graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
-                        total_messages += 1
-            
-            # 处理具体的对话消息（如果存在）
             for key, value in conversation_data.items():
                 if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
                     session_time = conversation_data.get(f"{key}_date_time", "")
-                    
                     for msg_idx, message in enumerate(value):
                         if isinstance(message, dict) and message.get('message'):
                             unit_id = f"{sample_id}_{key}_msg_{msg_idx}"
                             speaker = message.get('speaker', 'unknown')
                             content = message.get('message', '')
-                            
                             if content.strip():
                                 unit = MemoryUnit(
                                     uid=unit_id,
@@ -534,22 +782,17 @@ def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
                                         "speaker": speaker
                                     }
                                 )
-                                
                                 graph.add_unit(unit)
                                 graph.add_unit_to_space_in_map(unit_id, "locomo_dialogs")
-                                
-                                # 按说话人分类
-                                speaker_space = f"speaker_{speaker.lower().replace(' ', '_')}"
-                                graph.add_unit_to_space_in_map(unit_id, speaker_space)
-                                
+                                graph.add_unit_to_space_in_map(unit_id, f"session_{sample_id}_{key}")
+                                graph.add_unit_to_space_in_map(unit_id, f"speaker_{speaker.lower().replace(' ', '_')}")
                                 total_messages += 1
-        
-        # 处理QA对作为独立的知识点（可选，用于参考）
+
+        # 处理QA对（只加入QA空间，不加入locomo_dialogs）
         if 'qa' in sample:
             for qa_idx, qa in enumerate(sample['qa']):
                 if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
                     qa_unit_id = f"{sample_id}_qa_{qa_idx}"
-                    
                     qa_unit = MemoryUnit(
                         uid=qa_unit_id,
                         raw_data={
@@ -566,15 +809,12 @@ def ingest_conversation_history(graph: SemanticGraph, data: List[Dict]) -> int:
                             "evidence_sources": qa.get('evidence', [])
                         }
                     )
-                    
                     graph.add_unit(qa_unit)
                     graph.add_unit_to_space_in_map(qa_unit_id, "locomo_qa_pairs")
-                    
-                    # 按类别分类
                     category = qa.get('category', 0)
                     if category > 0:
                         graph.add_unit_to_space_in_map(qa_unit_id, f"locomo_qa_category_{category}")
-    
+
     logging.info(f"数据注入完成。共添加 {total_messages} 个记忆单元")
     return total_messages
 
@@ -673,14 +913,16 @@ def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eva
         except:
             search_results['dialog_only'] = []
         
-        # 在同类别QA中搜索
-        if category > 0:
-            try:
-                search_results[f'category_{category}'] = graph.search_similarity_in_graph(
-                    query_text=question, k=3, space_name=f"locomo_qa_category_{category}"
-                )
-            except:
-                search_results[f'category_{category}'] = []
+        # QA空间不作为检索策略
+
+        # # 在同类别QA中搜索
+        # if category > 0:
+        #     try:
+        #         search_results[f'category_{category}'] = graph.search_similarity_in_graph(
+        #             query_text=question, k=3, space_name=f"locomo_qa_category_{category}"
+        #         )
+        #     except:
+        #         search_results[f'category_{category}'] = []
         
         # 2. 融合检索结果
         all_retrieved = []
@@ -941,7 +1183,15 @@ def main():
         logging.info(f"数据集统计: {dataset_stats}")
         
         # 解析数据
-        conversations, qa_pairs = parse_locomo_data(raw_data)
+        memory_unit = parse_locomo_data(raw_data)
+
+        # 新增：提取QA对
+        qa_pairs = []
+        for sample in raw_data:
+            if 'qa' in sample:
+                for qa in sample['qa']:
+                    if isinstance(qa, dict) and qa.get('question') and qa.get('answer'):
+                        qa_pairs.append(qa)
         
         # 注入对话历史
         total_messages = ingest_conversation_history(hippo_graph, raw_data)

@@ -1,26 +1,31 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
+from embedding_tools import get_embeddings
 import pickle
 import random
 import os, json
 from tqdm import tqdm
 import time
 from global_methods import run_chatgpt
-from task_eval.rag_utils import get_embeddings
+# from task_eval.rag_utils import get_embeddings
 import tiktoken
 import numpy as np
 
-MAX_LENGTH={'gpt-4-turbo': 128000,
-            'gpt-4': 4096,
-            'gpt-3.5-turbo-16k': 16000,
-            'gpt-3.5-turbo-12k': 12000,
-            'gpt-3.5-turbo-8k': 8000,
-            'gpt-3.5-turbo-4k': 4000,
-            'gpt-3.5-turbo': 4096,
-            'gpt-4-32k': 320000}
-PER_QA_TOKEN_BUDGET = 50
+# MAX_LENGTH={'gpt-4-turbo': 128000,
+#             'gpt-4': 4096,
+#             'gpt-3.5-turbo-16k': 16000,
+#             'gpt-3.5-turbo-12k': 12000,
+#             'gpt-3.5-turbo-8k': 8000,
+#             'gpt-3.5-turbo-4k': 4000,
+#             'gpt-3.5-turbo': 4096,
+#             'gpt-4-32k': 320000}
+MAX_LENGTH = {
+    "gpt-3.5-turbo-16k-0613": 16385,
+    "gpt-4o-mini" : 128000,
+    "gpt-4o" : 128000,
+}
+PER_QA_TOKEN_BUDGET = 5000
 
 QA_PROMPT = """
 Based on the above context, write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
@@ -207,7 +212,11 @@ def get_input_context(data, num_question_tokens, encoding, args):
 def get_gpt_answers(in_data, out_data, prediction_key, args):
 
 
-    encoding = tiktoken.encoding_for_model('gpt-3.5-turbo-16k' if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else args.model)
+    # encoding = tiktoken.encoding_for_model('gpt-3.5-turbo-16k' if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else args.model)
+    if any(k in args.model for k in ['16k', '12k', '8k', '4k']):
+        encoding = tiktoken.encoding_for_model('gpt-3.5-turbo-16k')
+    else:
+        encoding = tiktoken.encoding_for_model(args.model)
     assert len(in_data['qa']) == len(out_data['qa']), (len(in_data['qa']), len(out_data['qa']))
 
     # start instruction prompt
