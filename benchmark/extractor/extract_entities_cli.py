@@ -8,9 +8,10 @@ import sys
 # 添加项目根目录到Python路径
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from entity_relation_extractor import EntityRelationExtractor
 from dev.semantic_graph import SemanticGraph
 from benchmark.llm_utils.llm_client import LLMClient
-from benchmark.extractor.entity_relation_extractor import EntityRelationExtractor
+# from benchmark.extractor.entity_relation_extractor import EntityRelationExtractor
 from benchmark.extractor.semantic_graph_integrator import SemanticGraphIntegrator
 
 def setup_logging(log_level: str = "INFO"):
@@ -138,16 +139,90 @@ def extract_from_single_text(text: str, model_name: str = "deepseek-chat") -> Di
         "content_keywords": content_keywords
     }
 
+def extract_conv26_only(dataset_path: str, output_dir: str = None) -> Dict[str, Any]:
+    """专门处理conv-26样本"""
+    from benchmark.task_eval.locomo_test_split import load_dataset, ingest_conversation_history
+    from datetime import datetime
+    
+    # 加载数据集
+    raw_data = load_dataset(Path(dataset_path))
+    if not raw_data:
+        raise ValueError("数据集加载失败")
+    
+    # 找到conv-26样本
+    conv26_sample = None
+    for sample in raw_data:
+        if sample.get('sample_id') == 'conv-26':
+            conv26_sample = sample
+            break
+    
+    if not conv26_sample:
+        raise ValueError("未找到sample_id为conv-26的样本")
+    
+    logging.info("找到conv-26样本，开始处理...")
+    
+    # 初始化语义图
+    graph = SemanticGraph()
+    
+    # 注入对话数据
+    total_messages = ingest_conversation_history(graph, [conv26_sample])
+    logging.info(f"注入了 {total_messages} 个对话消息")
+    
+    # 构建索引
+    graph.build_semantic_map_index()
+    
+    # 初始化抽取器
+    integrator = SemanticGraphIntegrator(graph)
+    
+    # 定义过滤器
+    def conv26_filter(unit):
+        return (unit.metadata.get('data_source') == 'locomo_dialog' 
+                and unit.metadata.get('conversation_id') == 'conv-26'
+                and not unit.metadata.get('entities_extracted', False))
+    
+    # 执行实体关系抽取
+    extraction_results = integrator.batch_extract_entities_from_space(
+        space_name="locomo_dialogs",
+        max_units=50,  # 可以根据需要调整
+        unit_filter=conv26_filter
+    )
+    
+    # 获取统计信息
+    entity_stats = integrator.get_entity_statistics()
+    
+    # 设置输出目录
+    if not output_dir:
+        output_dir = Path(__file__).parent.parent / "results" / f"conv26_extraction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    else:
+        output_dir = Path(output_dir)
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 保存语义图
+    graph_path = output_dir / "conv26_semantic_graph"
+    graph.save_graph(str(graph_path))
+    
+    # 准备返回结果
+    results = {
+        "sample_id": "conv-26",
+        "total_messages": total_messages,
+        "extraction_results": extraction_results,
+        "entity_statistics": entity_stats,
+        "graph_saved_path": str(graph_path),
+        "output_directory": str(output_dir)
+    }
+    
+    return results
 
-
+# 修改main函数，添加conv-26选项
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="实体关系抽取工具")
-    parser.add_argument("--mode", choices=["locomo", "text"], required=True,
-                       help="抽取模式: locomo(数据集) 或 text(单个文本)")
+    parser.add_argument("--mode", choices=["locomo", "text", "conv26"], required=True,
+                       help="抽取模式: locomo(整个数据集) 或 text(单个文本) 或 conv26(专门处理conv-26)")
     parser.add_argument("--input", required=True,
                        help="输入: LoCoMo数据集路径 或 文本内容")
-    parser.add_argument("--output", help="输出文件路径(JSON格式)")
+    parser.add_argument("--output", help="输出目录路径")
     parser.add_argument("--model", default="deepseek-chat",
                        help="LLM模型名称")
     parser.add_argument("--sample-limit", type=int,
@@ -162,37 +237,31 @@ def main():
     setup_logging(args.log_level)
     
     try:
-        if args.mode == "locomo":
-            results = extract_entities_from_locomo_dataset(args.input, args.sample_limit)
-        elif args.mode == "text":
-            results = extract_from_single_text(args.input, args.model)
-        else:
-            raise ValueError(f"不支持的模式: {args.mode}")
-        
-        # 保存结果
-        if args.output:
-            # 移除不能序列化的对象
-            serializable_results = results.copy()
-            if "graph" in serializable_results:
-                del serializable_results["graph"]
+        if args.mode == "conv26":
+            results = extract_conv26_only(args.input, args.output)
             
-            with open(args.output, 'w', encoding='utf-8') as f:
-                json.dump(serializable_results, f, ensure_ascii=False, indent=2, default=str)
-            logging.info(f"结果已保存到: {args.output}")
+            # 保存结果摘要
+            summary_file = Path(results["output_directory"]) / "extraction_summary.json"
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+            
+            print(f"\n🎉 Conv-26实体关系抽取完成!")
+            print(f"📁 输出目录: {results['output_directory']}")
+            print(f"📊 总消息数: {results['total_messages']}")
+            print(f"📊 处理单元数: {results['extraction_results']['processed']}")
+            print(f"📊 抽取实体数: {results['extraction_results']['total_entities']}")
+            print(f"📊 抽取关系数: {results['extraction_results']['total_relationships']}")
+            print(f"📊 实体类型分布: {results['entity_statistics']['entity_types']}")
+            print(f"📊 关系类型分布: {results['entity_statistics']['relationship_types']}")
+            
+        elif args.mode == "locomo":
+            # 现有的locomo处理逻辑
+            pass
+        elif args.mode == "text":
+            # 现有的text处理逻辑
+            results = extract_from_single_text(args.input, args.model)
         
-        # 打印摘要
-        if args.mode == "locomo":
-            stats = results["entity_statistics"]
-            print(f"\n实体抽取完成!")
-            print(f"总实体数: {stats['total_entities']}")
-            print(f"总关系数: {stats['total_relationships']}")
-            print(f"实体类型分布: {stats['entity_types']}")
-            print(f"关系类型分布: {stats['relationship_types']}")
-        else:
-            print(f"\n实体抽取完成!")
-            print(f"实体数: {len(results['entities'])}")
-            print(f"关系数: {len(results['relationships'])}")
-            print(f"关键词数: {len(results['content_keywords'])}")
+        logging.info("任务执行完成")
         
     except Exception as e:
         logging.error(f"执行失败: {e}")

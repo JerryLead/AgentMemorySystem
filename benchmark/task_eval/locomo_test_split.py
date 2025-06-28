@@ -679,14 +679,16 @@ def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eva
         
         if not question or not golden_answer:
             continue
-        
-        # 1. 多策略检索
+    
+        # 1. 多策略检索（排除QA空间）
         search_results = {}
         
-        # 全局搜索
-        search_results['global'] = graph.search_similarity_in_graph(
-            query_text=question, k=5
-        )
+        # 全局搜索（需要过滤QA结果）
+        all_global_results = graph.search_similarity_in_graph(query_text=question, k=10)
+        search_results['global'] = [
+            (unit, score) for unit, score in all_global_results 
+            if unit.metadata.get('data_source') != 'locomo_qa'
+        ][:5]
         
         # 在对话空间中搜索
         try:
@@ -695,6 +697,30 @@ def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eva
             )
         except:
             search_results['dialog_only'] = []
+        
+        # 在summary空间中搜索
+        try:
+            summary_results = []
+            # 可以遍历所有 session_summary_* 空间
+            # summary_results.extend(graph.search_similarity_in_graph(...))
+            search_results['summary_only'] = summary_results
+        except:
+            search_results['summary_only'] = []
+        
+        # # 1. 多策略检索
+        # search_results = {}
+        # # 全局搜索
+        # search_results['global'] = graph.search_similarity_in_graph(
+        #     query_text=question, k=5
+        # )
+        
+        # # 在对话空间中搜索
+        # try:
+        #     search_results['dialog_only'] = graph.search_similarity_in_graph(
+        #         query_text=question, k=5, space_name="locomo_dialogs"
+        #     )
+        # except:
+        #     search_results['dialog_only'] = []
         
         # QA空间不作为检索策略
 

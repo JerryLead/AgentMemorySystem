@@ -300,6 +300,71 @@ class SemanticGraphIntegrator:
         logging.info(f"批量实体抽取完成: {results}")
         return results
     
+    # def batch_extract_entities_from_space_optimized(self, space_name: str, 
+    #                                           max_units: int = None,
+    #                                           unit_filter=None,
+    #                                           batch_size: int = 5) -> Dict[str, Any]:
+    #     """
+    #     优化的批量实体抽取，支持批处理和上下文合并
+    #     """
+    #     space = self.graph.semantic_map.get_memory_space(space_name)
+    #     if not space:
+    #         logging.warning(f"内存空间 '{space_name}' 不存在")
+    #         return {"processed": 0, "extracted_entities": 0, "extracted_relationships": 0}
+        
+    #     # 获取待处理的单元
+    #     all_units = []
+    #     for uid in space.get_memory_uids():
+    #         unit = self.graph.get_unit(uid)
+    #         if unit and (not unit_filter or unit_filter(unit)):
+    #             all_units.append(unit)
+        
+    #     if max_units:
+    #         all_units = all_units[:max_units]
+        
+    #     logging.info(f"开始批量处理 {len(all_units)} 个单元")
+        
+    #     # 按会话分组批处理
+    #     session_groups = {}
+    #     for unit in all_units:
+    #         session = unit.metadata.get('session', 'default')
+    #         if session not in session_groups:
+    #             session_groups[session] = []
+    #         session_groups[session].append(unit)
+        
+    #     total_stats = {"processed": 0, "extracted_entities": 0, "extracted_relationships": 0}
+        
+    #     for session, units in session_groups.items():
+    #         logging.info(f"处理会话 {session}，包含 {len(units)} 个单元")
+            
+    #         # 合并同一会话的文本，提供更好的上下文
+    #         combined_text = self._combine_session_texts(units)
+            
+    #         # 批量抽取
+    #         entities, relationships, keywords = self.extractor.extract_entities_and_relations(combined_text)
+            
+    #         # 为每个单元创建实体单元
+    #         for unit in units:
+    #             unit_stats = self._create_entity_units_for_unit(unit, entities, relationships, keywords)
+    #             total_stats["processed"] += 1
+    #             total_stats["extracted_entities"] += unit_stats["entities"]
+    #             total_stats["extracted_relationships"] += unit_stats["relationships"]
+                
+    #             # 标记已处理
+    #             unit.metadata["entities_extracted"] = True
+        
+    #     return total_stats
+
+    # def _combine_session_texts(self, units: List[MemoryUnit]) -> str:
+    #     """合并同一会话的文本，保持上下文"""
+    #     texts = []
+    #     for unit in sorted(units, key=lambda u: u.metadata.get('timestamp', '')):
+    #         text_content = unit.raw_data.get('text_content', '')
+    #         speaker = unit.raw_data.get('speaker', 'Unknown')
+    #         texts.append(f"{speaker}: {text_content}")
+        
+    #     return '\n'.join(texts)
+    
     def _normalize_name(self, name: str) -> str:
         """标准化名称用于ID生成"""
         import re
