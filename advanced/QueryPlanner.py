@@ -7,231 +7,221 @@ from PIL import Image
 import logging
 from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import requests
+import re
 
-from ..core.Hippo import SemanticGraph
+from core.Hippo import SemanticGraph, MemoryUnit
 
 logging.basicConfig(
     format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO
 )
 
 
-class StructuredQuery:
-    def __init__(self, step, target_types, inputs, filters, semantic_query):
-        self.step = step
-        self.target_types = target_types
-        self.inputs = inputs
-        self.filters = filters
-        self.semantic_query = semantic_query
-
-
 class QueryPlanner:
     def __init__(self, semantic_graph: SemanticGraph):
         self.semantic_graph = semantic_graph
-        self.cache = {}
 
-    def generate_prompt(self, query:str,ms_names:List[str],ms_structures:str,rel_types:List[str],example_query=None,example_plan=None,):
-        prompt = f"""# SemanticGraph查询计划生成任务
+    def _generate_prompt(
+        self,
+        query: str,
+    ):
+        ms_names = self.semantic_graph.get_all_memory_space_names()
+        ms_structures = self.semantic_graph.get_memory_space_structures()
+        rel_types = self.semantic_graph.get_all_relations()
+
+        prompt = f"""
+# SemanticGraph查询计划生成任务
 
 你是一个专门处理SemanticGraph数据结构查询的AI助手。你的任务是将用户的自然语言查询转换为结构化的查询计划。
 
 ## 背景信息
 
-SemanticGraph是一种新型Python数据结构，它具有以下层次结构：
-- **MemoryUnit**：最基本的信息存储单元，作为图中的节点
-- **MemorySpace**：根据类别属性组织的MemoryUnit集合
-- **SemanticGraph**：包含多个MemorySpace的完整图结构
+SemanticGraph是一种新型Python数据结构，具有如下特点：
+- **MemoryUnit**：最基本的信息存储单元，作为图中的节点。
+- **MemorySpace**（ms）：用户主动组织的知识空间，支持多层嵌套和unit重叠。每个ms可包含unit和子ms，unit可属于多个ms，实现跨领域、跨主题的灵活组织。ms之间没有强制的树状限制，支持任意嵌套和重叠。
+- **SemanticGraph**：包含多个MemorySpace的完整图结构，支持unit间的显式结构边和隐式语义边。
 
 MemoryUnit之间存在两种连接方式：
 1. **显式结构边**：有向边，具有明确定义的关系类型
 2. **隐式语义边**：基于MemoryUnit内容之间的语义相似度建立的连接
 
-## 当前查询环境
+## 图结构信息
 
-现在，用户需要通过自然语言对这个SemanticGraph进行查询。你需要：
-1. 分析用户的自然语言查询
-2. 根据提供的图结构信息和可用API
-3. 生成一个JSON格式的查询计划
-
-## 提供的信息
-
-### 1. 用户查询
+### 记忆空间名称列表
 ```
-{query}
+{str(ms_names)}
 ```
 
-### 2. 图结构信息
+### 记忆空间嵌套结构（unit可重叠）
+```
+{str(ms_structures)}
+```
+- 注意：同一个unit可能出现在多个ms中，查询时可指定ms范围或合并结果。
 
-#### (a) 记忆空间名称列表
+### 显式关系边的类型
 ```
-{ms_names}
-```
-
-#### (b) 记忆空间结构描述
-```
-{ms_structures}
-```
-注意：同一记忆空间中的所有记忆单元具有相同的字段结构。
-
-#### (c) 显式关系边的类型
-```
-{rel_types}
+{str(rel_types)}
 ```
 
 ## 可用的查询API
 
-1. **search_similarity_in_graph(query_text, top_k=5, ms_name)**
-   - 功能：根据输入的自然语言查询，返回图中语义最相似的Top-K个记忆单元
+1. **search_similarity_in_graph(query_text, top_k=5, ms_names=None, recursive=True)**
+   - 功能：根据输入的自然语言查询，返回指定ms及其子ms中语义最相似的Top-K个记忆单元。
    - 参数：
-     - query_text: 自然语言查询文本
-     - top_k: 返回结果数量，默认为5
-     - ms_name: 指定记忆空间名称，若不指定则在全图范围内查找
+     - `query_text` (str): 自然语言查询文本
+     - `top_k` (int): 返回结果数量，默认为5
+     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
+     - `recursive` (bool): 是否递归包含子ms，默认为True
    - 返回：记忆单元列表
 
-2. **get_implicit_neighbors(uid, top_k=5, ms_name)**
-   - 功能：获取指定记忆单元的隐式关系邻居节点
+2. **get_explicit_neighbors(uids, rel_type=None, ms_names=None, direction="successors", recursive=True)**
+   - 功能：获取指定记忆单元的显式关系邻居节点，可限定ms范围。
+   - 参数：
+     - `uids` (List[str]): 源节点ID列表
+     - `rel_type` (Optional[str]): 关系类型筛选
+     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
+     - `direction` (str): 邻居方向，可选："successors"(出边邻居)，"predecessors"(入边邻居)，"all"(双向邻居)，默认为"successors"
+     - `recursive` (bool): 是否递归包含子ms，默认为True
+   - 返回：记忆单元列表
+
+3. **filter_memory_units(candidate_units=None, filter_condition=None, ms_names=None, recursive=True)**
+   - 功能：通过特定字段的值和操作符过滤记忆单元，支持ms范围限定。
+   - 参数：
+     - `candidate_units` (Optional[List[MemoryUnit]]): 候选记忆单元列表，若为None则使用全图记忆单元
+     - `filter_condition` (Optional[Dict]): 过滤条件，**每个字段必须为操作符字典**，如：
+       `{{ "field": {{"eq": value}} }}`、`{{"field": {{"in": [v1, v2]}}}}`、`{{"field": {{"gte": 2020, "lte": 2024}}}}`
+       支持的操作符有：
+         - `eq`（等于）
+         - `ne`（不等于）
+         - `in`（属于列表/集合）
+         - `nin`（不属于列表/集合）
+         - `gt`（大于）
+         - `gte`（大于等于）
+         - `lt`（小于）
+         - `lte`（小于等于）
+         - `contain`（op_val in val，适用于val为list/set/str等可迭代对象）
+         - `not_contain`（op_val not in val，适用于val为list/set/str等可迭代对象）
+     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
+     - `recursive` (bool): 是否递归包含子ms，默认为True
+   - 返回：过滤后的记忆单元列表
+
+4. **get_implicit_neighbors(uid, top_k=5, ms_names=None, recursive=True)**
+   - 功能：获取指定记忆单元的隐式关系邻居节点，可限定ms范围。
    - 参数：
      - uid: 记忆单元ID
      - top_k: 返回的邻居数量，默认为5
-     - ms_name: 指定记忆空间名称，若不指定则在全图范围内查找
-   - 返回：记忆单元列表
-
-3. **get_explicit_neighbors(src_uid=None, tgt_uid=None, rel_type=None)**
-   - 功能：获取记忆单元的显式关系邻居节点
-   - 参数：
-     - src_uid: 可选，源节点ID
-     - tgt_uid: 可选，目标节点ID
-     - rel_type: 可选，关系类型筛选
-   - 返回：记忆单元列表
-
-4. **filter_memory_units(filter_condition, ms_names)**
-   - 功能：通过特定字段的值过滤记忆单元
-   - 参数：
-     - filter_condition: 字典形式的过滤键值对
      - ms_names: 指定记忆空间名称列表，若不指定则在全图范围内查找
-   - 返回：过滤后的记忆单元列表
+     - recursive: 是否递归包含子ms，默认为True
+   - 返回：记忆单元列表
 
-5. **aggregate_results(memory_units)**
+5. **get_units_in_memory_space(ms_names, recursive=True)**
+   - 功能：获取指定ms及其子ms下所有unit。
+   - 参数：
+     - ms_names: 记忆空间名称列表
+     - recursive: 是否递归包含子ms，默认为True
+   - 返回：记忆单元列表
+
+6. **deduplicate_units(units)**
+   - 功能：对unit列表去重，避免重叠带来的重复。
+   - 参数：
+     - units: 记忆单元列表
+   - 返回：去重后的记忆单元列表
+
+7. **aggregate_results(memory_units)**
    - 功能：对查询结果进行聚合操作，统计记忆单元的出现频率
    - 参数：
      - memory_units: 记忆单元列表
    - 返回：聚合结果，记忆单元出现频率
 
-## 查询计划格式
+## 查询计划格式与变量引用规则
 
-你需要生成一个JSON格式的查询计划，包含以下结构：
+查询计划采用JSON格式，支持步骤间的变量引用机制：
+
+### 基本格式
 ```json
-{
+{{
   "plan": [
-    {
+    {{
       "step": 1,
       "operation": "API调用名称",
-      "parameters": {
+      "parameters": {{
         "参数名1": "参数值1",
         "参数名2": "参数值2"
-      },
+      }},
       "result_var": "存储结果的变量名"
-    },
-    {
+    }},
+    {{
       "step": 2,
       "operation": "API调用名称",
-      "parameters": {
-        "参数名": "参数值或之前步骤的变量名"
-      },
+      "parameters": {{
+        "参数名": "参数值或变量引用"
+      }},
       "result_var": "存储结果的变量名"
-    }
+    }}
   ]
-}
-```"""
+}}
+```
 
-        if example_query and example_plan:
+### 变量引用规则
+- 使用 `$变量名` 引用之前步骤的完整结果
+- 使用 `$变量名.属性名` 引用结果中的特定属性
+- 支持嵌套属性访问：`$变量名.属性1.属性2`
+- 支持跨ms、合并多个ms结果
 
-          prompt +=  f"""
-          
-## 示例
+### 变量引用示例
+```json
+{{
+  "plan": [
+    {{
+      "step": 1,
+      "operation": "get_units_in_memory_space",
+      "parameters": {{
+        "ms_names": ["AI文档", "NLP相关"],
+        "recursive": true
+      }},
+      "result_var": "candidate_units"
+    }},
+    {{
+      "step": 2,
+      "operation": "filter_memory_units",
+      "parameters": {{
+        "candidate_units": "$candidate_units",
+        "filter_condition": {{"type": {{"eq": "论文"}}}}
+      }},
+      "result_var": "filtered_papers"
+    }},
+    {{
+      "step": 3,
+      "operation": "deduplicate_units",
+      "parameters": {{
+        "units": "$filtered_papers"
+      }},
+      "result_var": "unique_papers"
+    }}
+  ]
+}}
+```
 
-以下是一个自然语言查询及其对应的查询计划示例：
+## 任务要求
+
+请根据以下用户自然语言查询，分析查询意图，并使用提供的API生成一个能有效检索所需信息的查询计划。
 
 ### 用户查询
 ```
-{example_query}
+{query}
 ```
 
-### 查询计划
-```json
-{example_plan}
-        ```"""
+## 输出要求
 
-        prompt+=f"""
-        
-## 你的任务
-
-    请根据用户的自然语言查询，分析查询意图，并使用提供的API生成一个能有效检索所需信息的查询计划。
-
-    只需输出JSON格式的查询计划，不需要解释或说明过程。确保JSON格式正确无误，可以被程序直接解析。"""
-
-#         prompt = f"""您是一个专门为SemanticGraph数据结构设计查询计划的AI助手。SemanticGraph是一种新型Python数据结构，以节点为粒度存储信息单元(MemoryUnit)，并以图的形式组织这些单元。这个数据结构具有以下特点：
-
-# 1. 层次结构：MemoryUnit -> MemorySpace -> SemanticGraph
-#    - MemoryUnit：基本信息单元，存储具体内容
-#    - MemorySpace：按照标量类别组织MemoryUnit，同一MemorySpace中的所有MemoryUnit具有相同的类别属性和字段结构
-#    - SemanticGraph：最顶层结构，包含多个MemorySpace
-
-# 2. 两种连接方式：
-#    - 显式结构边：有向边，明确存储节点间的关系类型
-#    - 隐式语义边：根据MemoryUnit内容间的语义相似度自动建立
-
-# 我将向您提供以下关键信息：
-# 1. 用户的自然语言查询描述
-# 2. 图结构信息：
-#    - 所有记忆空间名称(ms_names)
-#    - 每个记忆空间中记忆单元的所有字段及示例值
-#    - 显式关系边的关系类型(rel_type)
-# 3. 可用的查询API：
-#    - search_similarity_in_graph(query, top_k)：根据自然语言查询返回图中相似的Top-K个记忆单元
-#    - get_implicit_neighbors(memory_unit_id, top_k)：获取记忆单元的Top-K个隐式关系(语义相似)邻居节点
-#    - get_explicit_neighbors(source_id=None, target_id=None, rel_type=None)：获取记忆单元的显式关系邻居节点，可按源节点、目标节点或关系类型筛选
-#    - filter_memory_units(memory_units, field, value)：通过特定字段的值过滤记忆单元
-#    - aggregate_results(memory_units, field)：对查询结果进行聚合操作(当前仅支持频率统计)
-
-# 您的任务是将用户的自然语言查询转换为结构化的查询计划。查询计划应由一系列步骤组成，每一步可以：
-# 1. 调用API
-# 2. 暂时存储中间结果
-# 3. 使用先前步骤产生的结果
-
-# 请以JSON格式输出查询计划，格式示例：
-# {{
-#   "steps": [
-#     {{
-#       "step_id": 1,
-#       "operation": "API_NAME",
-#       "parameters": {{
-#         "param1": "value1",
-#         "param2": "value2"
-#       }},
-#       "output_var": "result_1"
-#     }},
-#     {{
-#       "step_id": 2,
-#       "operation": "API_NAME",
-#       "parameters": {{
-#         "param1": "$result_1",
-#         "param2": "value2"
-#       }},
-#       "output_var": "result_2"
-#     }}
-#   ]
-# }}
-
-# 在参数值中，可以使用"$变量名"引用之前步骤的输出结果。
-
-# 请基于我提供的信息，仅输出符合要求的JSON格式查询计划。不需要解释或其他额外内容。
-# """
-
+- 只输出JSON格式的查询计划，不需要解释或说明过程
+- 确保JSON格式正确无误，可以被程序直接解析
+- 合理使用变量引用机制，提高查询效率
+- 确保查询计划能够准确回答用户的问题
+"""
         return prompt
 
     def query_llm(self, query):
-        prompt = self.generate_prompt(query)
-        print(f"prompt: {prompt}")
+        prompt = self._generate_prompt(query)
+
         response = requests.post(
             "http://localhost:11434/api/generate",
             json={"model": "deepseek-r1:32b", "prompt": prompt, "stream": False},
@@ -242,82 +232,109 @@ MemoryUnit之间存在两种连接方式：
     def generate_query_plan(
         self,
         natural_language_query,
-    ):
+    ) -> Optional[Dict]:
         result = self.query_llm(natural_language_query)
+        match = re.search(r"```json\n(.*?)\n```", result, re.DOTALL)
+        if not match:
+            logging.error("Failed to extract JSON query plan from LLM response.")
+            return None
+        structured_plan = match.group(1).strip()
 
         try:
-            structured_query = json.loads(result)
+            plan = json.loads(structured_plan)
         except json.JSONDecodeError as e:
             logging.error(f"JSONDecodeError: {e}")
             return None
-        return structured_query
+        return plan
 
-  
+    def _resolve_variable(self, value, temp_results):
+        """
+        支持 $var, $var.field, $var.field1.field2 形式的变量解析，支持对象属性提取。
+        针对 MemoryUnit，uid 用属性，其它字段用 raw_data。
+        """
+        if not (isinstance(value, str) and value.startswith("$")):
+            return value
 
-    def semantic_search(self, query, filtered_datas: list[tuple]):
-        if not filtered_datas:
-            return []
+        parts = value[1:].split(".")
+        var = temp_results.get(parts[0], None)
+        if var is None:
+            return None
 
-        # 提取过滤数据中的嵌入向量
-        filtered_embeddings = [data[3] for data in filtered_datas]
+        def extract(obj, keys):
+            if not keys:
+                return obj
+            key = keys[0]
+            rest_keys = keys[1:]
+            if isinstance(obj, list):
+                results = [extract(item, keys) for item in obj if item is not None]
+                results = [r for r in results if r is not None]
+                if not results:
+                    return None
+                if len(results) == 1:
+                    return results[0]
+                return results
+            elif isinstance(obj, dict):
+                return extract(obj.get(key, None), rest_keys)
+            else:
+                # 针对 MemoryUnit 特殊处理
+                if obj.__class__.__name__ == "MemoryUnit":
+                    if key == "uid":
+                        attr = getattr(obj, "uid", None)
+                        return extract(attr, rest_keys)
+                    else:
+                        raw_data = getattr(obj, "raw_data", {})
+                        attr = raw_data.get(key, None)
+                        return extract(attr, rest_keys)
+                # 其它对象按原有逻辑
+                if hasattr(obj, key):
+                    attr = getattr(obj, key)
+                    return extract(attr, rest_keys)
+                else:
+                    return None
 
-        # 获取查询的嵌入向量
-        query_emb = self.semantic_graph.semantic_map._get_text_embedding(query).reshape(
-            1, -1
-        )
+        return extract(var, parts[1:])
 
-        top_k = min(50, len(filtered_embeddings))
+    def execute_query_plan(self, structured_query: Dict) -> List[MemoryUnit]:
+        plan = structured_query.get("plan", None)
+        if not plan:
+            raise ValueError("Structured query doesnot have plan.")
 
-        # 如果过滤后的嵌入向量数量较少，直接计算距离而不构建索引
-        if len(filtered_embeddings) < 10000:
-            distances = np.linalg.norm(
-                np.array(filtered_embeddings) - query_emb, ord=2, axis=1
+        temp_results = {}
+        for step in plan:
+            oper = step.get("operation", None)
+            params: Dict[str, str] | None = step.get("parameters", None)
+            res = step.get("result_var", None)
+
+            # 递归解析参数中的变量
+            def resolve_params(obj):
+                if isinstance(obj, dict):
+                    return {k: resolve_params(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [resolve_params(v) for v in obj]
+                elif isinstance(obj, str) and obj.startswith("$"):
+                    return self._resolve_variable(obj, temp_results)
+                else:
+                    return obj
+
+            processed_params = resolve_params(params) if params else {}
+
+            print(
+                f"执行操作：{oper}，参数：{processed_params}，暂存为：{res}，已有结果：{temp_results}"
             )
-            results = sorted(zip(filtered_datas, distances), key=lambda x: x[1])
-            return [result[0] for result in results[:top_k]]
 
-        # 否则，使用FAISS构建索引并执行搜索
-        index = faiss.IndexFlatL2(query_emb.shape[1])
-        index.add(np.array(filtered_embeddings, dtype=np.float32))
-        distances, indices = index.search(query_emb, len(filtered_embeddings))
+            if hasattr(self.semantic_graph, oper):
+                temp_results[res] = getattr(self.semantic_graph, oper)(
+                    **processed_params
+                )
+            else:
+                raise ValueError(f"Operation {oper} not found in SemanticGraph.")
 
-        # 根据距离排序（升序）
-        results = sorted(zip(filtered_datas, distances[0]), key=lambda x: x[1])
-        return [result[0] for result in results[:top_k]]
-
-
-def yelp_init(
-    category_map_disk_path: str,
-    attribute_map_disk_path: str,
-    sgraph_disk_path: str,
-    sgraph_semantic_map_disk_path: str,
-    db_name="yelp_sds",
-):
-    global category_map, attribute_map, sgraph
-
-    # category_map = SemanticMap()
-    # category_map.load_data(category_map_disk_path)
-    # category_map.build_index()
-
-    # attribute_map = SemanticMap()
-    # attribute_map.load_data(attribute_map_disk_path)
-    # attribute_map.build_index()
-
-    sgraph = SemanticGraph()
-    sgraph.load_data(sgraph_disk_path)
-    sgraph.semantic_map.load_data(sgraph_semantic_map_disk_path)
-    sgraph.build_index()
-
-    # sgraph.save_graph(
-    #     "/mnt/data1/home/guozy/gzy/SDS/multimodal_semantic_map_dev/persist_data/graph/yelp_big.pkl"
-    # )
-    # sgraph.semantic_map.save_data(
-    #     "/mnt/data1/home/guozy/gzy/SDS/multimodal_semantic_map_dev/persist_data/map/yelp_big.pkl"
-    # )
+        return list(temp_results.values())[-1] if temp_results else []
 
 
 if __name__ == "__main__":
-    # LLM-based query parsing and execution
+    sgraph = SemanticGraph.load_graph("path/to/your/semantic_graph dir")
+
     planner = QueryPlanner(sgraph)
 
     natural_language_query = "Recommend some restaurants in California with good environment and spicy Chinese food."
@@ -330,17 +347,14 @@ if __name__ == "__main__":
     找到我朋友们评论过的海鲜餐厅
     """
 
-    structured_query = planner.generate_query_plan(None, None, natural_language_query)
-    # structured_query = planner.parse_query(
-    #     category_map, attribute_map, natural_language_query
-    # )
+    # planner.generate_prompt(natural_language_query, "")
+    plan = planner.generate_query_plan(natural_language_query)
 
-    if structured_query:
-        # plan = planner.generate_plan(structured_query)
-        results = planner.execute_plan(structured_query)
+    if plan:
+        results = planner.execute_query_plan(plan)
 
         print(f"\n\nQuery: {natural_language_query}, Results =>")
         for r in results:
-            print(r)
+            print(r.__repr__())
     else:
         print("Failed to parse the query.")
