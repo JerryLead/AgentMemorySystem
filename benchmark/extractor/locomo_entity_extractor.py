@@ -2,7 +2,7 @@ import sys
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple  # 添加 Tuple
 from datetime import datetime
 import networkx as nx
 # 添加项目根目录到Python路径
@@ -86,18 +86,567 @@ class LoCoMoEntityExtractor:
                 return sample
         return None
     
-    def _extract_full_conversation_text(self, sample: dict) -> str:
-        """提取样本的完整对话文本"""
+    # def _extract_full_conversation_text(self, sample: dict) -> str:
+    #     """提取样本的完整对话文本"""
+    #     conversation = sample.get('conversation', {})
+    #     conversation_texts = []
+        
+    #     # 获取说话者信息
+    #     speaker_a = conversation.get('speaker_a', 'Speaker A')
+    #     speaker_b = conversation.get('speaker_b', 'Speaker B')
+        
+    #     # 按会话顺序提取对话内容
+    #     session_keys = [key for key in conversation.keys() 
+    #                    if key.startswith('session_') and not key.endswith('_date_time')]
+    #     session_keys.sort(key=lambda x: int(x.split('_')[1]))
+        
+    #     for session_key in session_keys:
+    #         session_messages = conversation.get(session_key, [])
+    #         session_datetime = conversation.get(f"{session_key}_date_time", "")
+            
+    #         if session_messages and session_datetime:
+    #             conversation_texts.append(f"\n=== {session_key.upper()} ({session_datetime}) ===")
+                
+    #             for message in session_messages:
+    #                 if isinstance(message, dict):
+    #                     speaker = message.get('speaker', 'Unknown')
+    #                     content = message.get('content', '')
+    #                     if speaker and content:
+    #                         conversation_texts.append(f"{speaker}: {content}")
+    #                 elif isinstance(message, str):
+    #                     # 有些格式可能是简单的字符串
+    #                     conversation_texts.append(message)
+        
+    #     # 添加会话摘要信息
+    #     session_summary = sample.get('session_summary', {})
+    #     if session_summary:
+    #         conversation_texts.append("\n=== SESSION SUMMARIES ===")
+    #         for summary_key, summary_content in session_summary.items():
+    #             if isinstance(summary_content, str):
+    #                 conversation_texts.append(f"{summary_key}: {summary_content}")
+        
+    #     # 添加事件摘要
+    #     event_summary = sample.get('event_summary', {})
+    #     if event_summary:
+    #         conversation_texts.append("\n=== EVENT SUMMARIES ===")
+    #         for event_key, event_content in event_summary.items():
+    #             if isinstance(event_content, dict):
+    #                 for sub_key, sub_content in event_content.items():
+    #                     if isinstance(sub_content, str):
+    #                         conversation_texts.append(f"{event_key}.{sub_key}: {sub_content}")
+        
+    #     # 添加观察记录
+    #     observations = sample.get('observation', {})
+    #     if observations:
+    #         conversation_texts.append("\n=== OBSERVATIONS ===")
+    #         for obs_key, obs_content in observations.items():
+    #             if isinstance(obs_content, dict):
+    #                 for sub_key, sub_content in obs_content.items():
+    #                     if isinstance(sub_content, str):
+    #                         conversation_texts.append(f"{obs_key}.{sub_key}: {sub_content}")
+        
+    #     full_text = "\n".join(conversation_texts)
+        
+    #     # 添加基本上下文信息
+    #     context_info = f"""
+    #     === CONVERSATION CONTEXT ===
+    #     Sample ID: {sample.get('sample_id', 'Unknown')}
+    #     Participants: {speaker_a} and {speaker_b}
+    #     Total Sessions: {len(session_keys)}
+    #     Total Messages: {sum(len(conversation.get(key, [])) for key in session_keys)}
+
+    #     === FULL CONVERSATION CONTENT ===
+    #     {full_text}
+    #     """
+        
+    #     return context_info
+    # def _extract_full_conversation_text(self, sample: dict) -> Tuple[str, Dict[str, Tuple[int, int]]]:
+    #     """提取样本的完整对话文本，同时返回位置索引"""
+    #     conversation = sample.get('conversation', {})
+    #     conversation_texts = []
+    #     position_map = {}  # 记录每个片段在完整文本中的位置
+        
+    #     # 获取说话者信息
+    #     speaker_a = conversation.get('speaker_a', 'Speaker A')
+    #     speaker_b = conversation.get('speaker_b', 'Speaker B')
+        
+    #     # 添加基本上下文信息
+    #     context_info = f"""=== CONVERSATION CONTEXT ===
+    #     Sample ID: {sample.get('sample_id', 'Unknown')}
+    #     Participants: {speaker_a} and {speaker_b}
+    #     Total Sessions: {len([k for k in conversation.keys() if k.startswith('session_') and not k.endswith('_date_time')])}
+
+    #     === FULL CONVERSATION CONTENT ===
+
+    #     """
+    #     conversation_texts.append(context_info)
+    #     current_position = len(context_info)
+        
+    #     # 按会话顺序提取对话内容
+    #     session_keys = [key for key in conversation.keys() 
+    #                 if key.startswith('session_') and not key.endswith('_date_time')]
+    #     session_keys.sort(key=lambda x: int(x.split('_')[1]))
+        
+    #     for session_key in session_keys:
+    #         session_messages = conversation.get(session_key, [])
+    #         session_datetime = conversation.get(f"{session_key}_date_time", "")
+            
+    #         if session_messages and session_datetime:
+    #             session_header = f"\n=== {session_key.upper()} ({session_datetime}) ===\n"
+    #             conversation_texts.append(session_header)
+    #             current_position += len(session_header)
+                
+    #             for msg_idx, message in enumerate(session_messages):
+    #                 if isinstance(message, dict):
+    #                     speaker = message.get('speaker', 'Unknown')
+    #                     content = message.get('content', '')
+    #                     if speaker and content:
+    #                         message_text = f"{speaker}: {content}\n"
+                            
+    #                         # 记录这条消息的位置
+    #                         start_pos = current_position
+    #                         end_pos = current_position + len(message_text)
+    #                         position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                             "session": session_key,
+    #                             "session_datetime": session_datetime,
+    #                             "speaker": speaker,
+    #                             "content": content,
+    #                             "message_index": msg_idx
+    #                         })
+                            
+    #                         conversation_texts.append(message_text)
+    #                         current_position = end_pos
+    #                 elif isinstance(message, str):
+    #                     message_text = f"{message}\n"
+    #                     start_pos = current_position
+    #                     end_pos = current_position + len(message_text)
+    #                     position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                         "session": session_key,
+    #                         "session_datetime": session_datetime,
+    #                         "content": message,
+    #                         "message_index": msg_idx
+    #                     })
+    #                     conversation_texts.append(message_text)
+    #                     current_position = end_pos
+        
+    #     # 添加其他部分（摘要等）
+    #     session_summary = sample.get('session_summary', {})
+    #     if session_summary:
+    #         summary_header = "\n=== SESSION SUMMARIES ===\n"
+    #         conversation_texts.append(summary_header)
+    #         current_position += len(summary_header)
+            
+    #         for summary_key, summary_content in session_summary.items():
+    #             if isinstance(summary_content, str):
+    #                 summary_text = f"{summary_key}: {summary_content}\n"
+    #                 start_pos = current_position
+    #                 end_pos = current_position + len(summary_text)
+    #                 position_map[f"summary_{summary_key}"] = (start_pos, end_pos, {
+    #                     "type": "session_summary",
+    #                     "key": summary_key,
+    #                     "content": summary_content
+    #                 })
+    #                 conversation_texts.append(summary_text)
+    #                 current_position = end_pos
+        
+    #     # 事件摘要和观察也类似处理...
+        
+    #     full_text = "".join(conversation_texts)
+    #     return full_text, position_map
+    # def _extract_full_conversation_text(self, sample: dict) -> Tuple[str, Dict[str, Tuple[int, int]]]:
+    #     """提取样本的完整对话文本，同时返回位置索引"""
+    #     conversation = sample.get('conversation', {})
+    #     conversation_texts = []
+    #     position_map = {}  # 记录每个片段在完整文本中的位置
+        
+    #     # 获取说话者信息
+    #     speaker_a = conversation.get('speaker_a', 'Speaker A')
+    #     speaker_b = conversation.get('speaker_b', 'Speaker B')
+        
+    #     # 添加基本上下文信息
+    #     context_info = f"""=== CONVERSATION CONTEXT ===
+    #     Sample ID: {sample.get('sample_id', 'Unknown')}
+    #     Participants: {speaker_a} and {speaker_b}
+    #     Total Sessions: {len([k for k in conversation.keys() if k.startswith('session_') and not k.endswith('_date_time')])}
+
+    #     === FULL CONVERSATION CONTENT ===
+
+    #     """
+    #     conversation_texts.append(context_info)
+    #     current_position = len(context_info)
+        
+    #     # 1. 按会话顺序提取实际对话内容
+    #     session_keys = [key for key in conversation.keys() 
+    #                 if key.startswith('session_') and not key.endswith('_date_time')]
+    #     session_keys.sort(key=lambda x: int(x.split('_')[1]))
+        
+    #     for session_key in session_keys:
+    #         session_messages = conversation.get(session_key, [])
+    #         session_datetime = conversation.get(f"{session_key}_date_time", "")
+            
+    #         if session_messages and session_datetime:
+    #             session_header = f"\n=== {session_key.upper()} ({session_datetime}) ===\n"
+    #             conversation_texts.append(session_header)
+    #             current_position += len(session_header)
+                
+    #             for msg_idx, message in enumerate(session_messages):
+    #                 if isinstance(message, dict):
+    #                     speaker = message.get('speaker', 'Unknown')
+    #                     content = message.get('content', '')
+    #                     text_content = message.get('text', '')  # 有些消息可能用 'text' 字段
+                        
+    #                     # 优先使用 content，如果没有则使用 text
+    #                     actual_content = content or text_content
+                        
+    #                     if speaker and actual_content:
+    #                         message_text = f"{speaker}: {actual_content}\n"
+                            
+    #                         # 记录这条消息的位置
+    #                         start_pos = current_position
+    #                         end_pos = current_position + len(message_text)
+    #                         position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                             "session": session_key,
+    #                             "session_datetime": session_datetime,
+    #                             "speaker": speaker,
+    #                             "content": actual_content,
+    #                             "message_index": msg_idx
+    #                         })
+                            
+    #                         conversation_texts.append(message_text)
+    #                         current_position = end_pos
+    #                 elif isinstance(message, str):
+    #                     message_text = f"{message}\n"
+    #                     start_pos = current_position
+    #                     end_pos = current_position + len(message_text)
+    #                     position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                         "session": session_key,
+    #                         "session_datetime": session_datetime,
+    #                         "content": message,
+    #                         "message_index": msg_idx
+    #                     })
+    #                     conversation_texts.append(message_text)
+    #                     current_position = end_pos
+        
+    #     # 2. 添加事件摘要信息 (event_summary)
+    #     event_summary = sample.get('event_summary', {})
+    #     if event_summary:
+    #         event_header = "\n=== EVENT SUMMARIES ===\n"
+    #         conversation_texts.append(event_header)
+    #         current_position += len(event_header)
+            
+    #         # 按会话顺序处理事件摘要
+    #         for event_key in sorted(event_summary.keys()):
+    #             event_data = event_summary[event_key]
+    #             if isinstance(event_data, dict):
+    #                 # 添加事件日期
+    #                 event_date = event_data.get('date', '')
+    #                 if event_date:
+    #                     date_text = f"\n--- {event_key.upper()} ({event_date}) ---\n"
+    #                     conversation_texts.append(date_text)
+    #                     current_position += len(date_text)
+                    
+    #                 # 处理每个说话者的事件
+    #                 for speaker, events in event_data.items():
+    #                     if speaker != 'date' and isinstance(events, list):
+    #                         for event_idx, event_desc in enumerate(events):
+    #                             if isinstance(event_desc, str) and event_desc.strip():
+    #                                 event_text = f"{speaker}: {event_desc}\n"
+    #                                 start_pos = current_position
+    #                                 end_pos = current_position + len(event_text)
+    #                                 position_map[f"{event_key}_{speaker}_{event_idx}"] = (start_pos, end_pos, {
+    #                                     "type": "event_summary",
+    #                                     "session": event_key,
+    #                                     "date": event_date,
+    #                                     "speaker": speaker,
+    #                                     "content": event_desc,
+    #                                     "event_index": event_idx
+    #                                 })
+    #                                 conversation_texts.append(event_text)
+    #                                 current_position = end_pos
+        
+    #     # 3. 添加观察记录 (observation)
+    #     observations = sample.get('observation', {})
+    #     if observations:
+    #         obs_header = "\n=== OBSERVATIONS ===\n"
+    #         conversation_texts.append(obs_header)
+    #         current_position += len(obs_header)
+            
+    #         # 按会话顺序处理观察记录
+    #         for obs_key in sorted(observations.keys()):
+    #             obs_data = observations[obs_key]
+    #             if isinstance(obs_data, dict):
+    #                 obs_section_header = f"\n--- {obs_key.upper()} ---\n"
+    #                 conversation_texts.append(obs_section_header)
+    #                 current_position += len(obs_section_header)
+                    
+    #                 # 处理每个说话者的观察
+    #                 for speaker, obs_list in obs_data.items():
+    #                     if isinstance(obs_list, list):
+    #                         for obs_idx, observation in enumerate(obs_list):
+    #                             if isinstance(observation, str) and observation.strip():
+    #                                 obs_text = f"{speaker} observed: {observation}\n"
+    #                                 start_pos = current_position
+    #                                 end_pos = current_position + len(obs_text)
+    #                                 position_map[f"{obs_key}_{speaker}_{obs_idx}"] = (start_pos, end_pos, {
+    #                                     "type": "observation",
+    #                                     "session": obs_key,
+    #                                     "speaker": speaker,
+    #                                     "content": observation,
+    #                                     "observation_index": obs_idx
+    #                                 })
+    #                                 conversation_texts.append(obs_text)
+    #                                 current_position = end_pos
+        
+    #     # 4. 添加会话摘要信息 (session_summary) - 作为补充信息
+    #     session_summary = sample.get('session_summary', {})
+    #     if session_summary:
+    #         summary_header = "\n=== SESSION SUMMARIES ===\n"
+    #         conversation_texts.append(summary_header)
+    #         current_position += len(summary_header)
+            
+    #         # 按会话顺序处理摘要
+    #         for summary_key in sorted(session_summary.keys()):
+    #             summary_content = session_summary[summary_key]
+    #             if isinstance(summary_content, str) and summary_content.strip():
+    #                 summary_text = f"{summary_key}: {summary_content}\n"
+    #                 start_pos = current_position
+    #                 end_pos = current_position + len(summary_text)
+    #                 position_map[f"summary_{summary_key}"] = (start_pos, end_pos, {
+    #                     "type": "session_summary",
+    #                     "key": summary_key,
+    #                     "content": summary_content
+    #                 })
+    #                 conversation_texts.append(summary_text)
+    #                 current_position = end_pos
+        
+    #     full_text = "".join(conversation_texts)
+    #     return full_text, position_map
+
+    # def _extract_full_conversation_text(self, sample: dict) -> Tuple[str, Dict[str, Tuple[int, int]]]:
+    #     """提取样本的完整对话文本，同时返回位置索引"""
+    #     conversation = sample.get('conversation', {})
+    #     conversation_texts = []
+    #     position_map = {}  # 记录每个片段在完整文本中的位置
+        
+    #     # 获取说话者信息
+    #     speaker_a = conversation.get('speaker_a', 'Speaker A')
+    #     speaker_b = conversation.get('speaker_b', 'Speaker B')
+        
+    #     # 添加基本上下文信息
+    #     context_info = f"""=== CONVERSATION CONTEXT ===
+    #     Sample ID: {sample.get('sample_id', 'Unknown')}
+    #     Participants: {speaker_a} and {speaker_b}
+
+    #     === FULL CONVERSATION CONTENT ===
+
+    #     """
+    #     conversation_texts.append(context_info)
+    #     current_position = len(context_info)
+        
+    #     # 统计实际有内容的部分
+    #     has_actual_conversations = False
+    #     has_event_summaries = False
+    #     has_observations = False
+    #     has_session_summaries = False
+        
+    #     # 1. 按会话顺序提取实际对话内容
+    #     session_keys = [key for key in conversation.keys() 
+    #                 if key.startswith('session_') and not key.endswith('_date_time')]
+    #     session_keys.sort(key=lambda x: int(x.split('_')[1]))
+        
+    #     for session_key in session_keys:
+    #         session_messages = conversation.get(session_key, [])
+    #         session_datetime = conversation.get(f"{session_key}_date_time", "")
+            
+    #         if session_messages and session_datetime:
+    #             has_actual_conversations = True
+    #             session_header = f"\n=== {session_key.upper()} ({session_datetime}) ===\n"
+    #             conversation_texts.append(session_header)
+    #             current_position += len(session_header)
+                
+    #             for msg_idx, message in enumerate(session_messages):
+    #                 if isinstance(message, dict):
+    #                     # 处理结构化消息
+    #                     speaker = message.get('speaker', '')
+    #                     content = message.get('content', '')
+    #                     text_content = message.get('text', '')
+                        
+    #                     actual_content = content or text_content
+                        
+    #                     if speaker and actual_content:
+    #                         message_text = f"{speaker}: {actual_content}\n"
+    #                     elif actual_content:
+    #                         message_text = f"{actual_content}\n"
+    #                     else:
+    #                         continue
+                            
+    #                     # 记录这条消息的位置
+    #                     start_pos = current_position
+    #                     end_pos = current_position + len(message_text)
+    #                     position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                         "session": session_key,
+    #                         "session_datetime": session_datetime,
+    #                         "speaker": speaker or "Unknown",
+    #                         "content": actual_content,
+    #                         "message_index": msg_idx
+    #                     })
+                        
+    #                     conversation_texts.append(message_text)
+    #                     current_position = end_pos
+                        
+    #                 elif isinstance(message, str) and message.strip():
+    #                     # 处理纯文本消息
+    #                     message_text = f"{message}\n"
+    #                     start_pos = current_position
+    #                     end_pos = current_position + len(message_text)
+    #                     position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+    #                         "session": session_key,
+    #                         "session_datetime": session_datetime,
+    #                         "content": message,
+    #                         "message_index": msg_idx
+    #                     })
+    #                     conversation_texts.append(message_text)
+    #                     current_position = end_pos
+        
+    #     # 2. 添加事件摘要信息 (event_summary)
+    #     event_summary = sample.get('event_summary', {})
+    #     if event_summary:
+    #         has_event_summaries = True
+    #         event_header = "\n=== EVENT SUMMARIES ===\n"
+    #         conversation_texts.append(event_header)
+    #         current_position += len(event_header)
+            
+    #         for event_key in sorted(event_summary.keys()):
+    #             event_data = event_summary[event_key]
+    #             if isinstance(event_data, dict):
+    #                 event_date = event_data.get('date', '')
+    #                 if event_date:
+    #                     date_text = f"\n--- {event_key.upper()} ({event_date}) ---\n"
+    #                     conversation_texts.append(date_text)
+    #                     current_position += len(date_text)
+                    
+    #                 # 处理每个说话者的事件
+    #                 for speaker, events in event_data.items():
+    #                     if speaker != 'date' and isinstance(events, list) and events:
+    #                         for event_idx, event_desc in enumerate(events):
+    #                             if isinstance(event_desc, str) and event_desc.strip():
+    #                                 event_text = f"{speaker}: {event_desc}\n"
+    #                                 start_pos = current_position
+    #                                 end_pos = current_position + len(event_text)
+    #                                 position_map[f"{event_key}_{speaker}_{event_idx}"] = (start_pos, end_pos, {
+    #                                     "type": "event_summary",
+    #                                     "session": event_key,
+    #                                     "date": event_date,
+    #                                     "speaker": speaker,
+    #                                     "content": event_desc,
+    #                                     "event_index": event_idx
+    #                                 })
+    #                                 conversation_texts.append(event_text)
+    #                                 current_position = end_pos
+        
+    #     # 3. 添加观察记录 (observation)
+    #     observations = sample.get('observation', {})
+    #     if observations:
+    #         has_observations = True
+    #         obs_header = "\n=== OBSERVATIONS ===\n"
+    #         conversation_texts.append(obs_header)
+    #         current_position += len(obs_header)
+            
+    #         for obs_key in sorted(observations.keys()):
+    #             obs_data = observations[obs_key]
+    #             if isinstance(obs_data, dict) and obs_data:
+    #                 obs_section_header = f"\n--- {obs_key.upper()} ---\n"
+    #                 conversation_texts.append(obs_section_header)
+    #                 current_position += len(obs_section_header)
+                    
+    #                 for speaker, obs_list in obs_data.items():
+    #                     if isinstance(obs_list, list) and obs_list:
+    #                         for obs_idx, observation in enumerate(obs_list):
+    #                             if isinstance(observation, str) and observation.strip():
+    #                                 obs_text = f"{speaker} observed: {observation}\n"
+    #                                 start_pos = current_position
+    #                                 end_pos = current_position + len(obs_text)
+    #                                 position_map[f"{obs_key}_{speaker}_{obs_idx}"] = (start_pos, end_pos, {
+    #                                     "type": "observation",
+    #                                     "session": obs_key,
+    #                                     "speaker": speaker,
+    #                                     "content": observation,
+    #                                     "observation_index": obs_idx
+    #                                 })
+    #                                 conversation_texts.append(obs_text)
+    #                                 current_position = end_pos
+        
+    #     # 4. 添加会话摘要信息 (session_summary)
+    #     session_summary = sample.get('session_summary', {})
+    #     if session_summary:
+    #         has_session_summaries = True
+    #         summary_header = "\n=== SESSION SUMMARIES ===\n"
+    #         conversation_texts.append(summary_header)
+    #         current_position += len(summary_header)
+            
+    #         for summary_key in sorted(session_summary.keys()):
+    #             summary_content = session_summary[summary_key]
+    #             if isinstance(summary_content, str) and summary_content.strip():
+    #                 summary_text = f"{summary_key}: {summary_content}\n\n"
+    #                 start_pos = current_position
+    #                 end_pos = current_position + len(summary_text)
+    #                 position_map[f"summary_{summary_key}"] = (start_pos, end_pos, {
+    #                     "type": "session_summary",
+    #                     "key": summary_key,
+    #                     "content": summary_content
+    #                 })
+    #                 conversation_texts.append(summary_text)
+    #                 current_position = end_pos
+        
+    #     # 5. 添加数据来源说明
+    #     data_sources = []
+    #     if has_actual_conversations:
+    #         data_sources.append("实际对话记录")
+    #     if has_event_summaries:
+    #         data_sources.append("事件摘要")
+    #     if has_observations:
+    #         data_sources.append("观察记录")
+    #     if has_session_summaries:
+    #         data_sources.append("会话摘要")
+        
+    #     if not data_sources:
+    #         data_sources.append("无有效内容")
+        
+    #     data_source_info = f"\n=== 数据来源 ===\n本样本包含: {', '.join(data_sources)}\n"
+    #     conversation_texts.append(data_source_info)
+        
+    #     full_text = "".join(conversation_texts)
+    #     return full_text, position_map
+    def _extract_full_conversation_text(self, sample: dict) -> Tuple[str, Dict[str, Tuple[int, int]]]:
+        """提取样本的完整对话文本，同时返回位置索引"""
         conversation = sample.get('conversation', {})
         conversation_texts = []
+        position_map = {}  # 记录每个片段在完整文本中的位置
         
         # 获取说话者信息
         speaker_a = conversation.get('speaker_a', 'Speaker A')
         speaker_b = conversation.get('speaker_b', 'Speaker B')
         
-        # 按会话顺序提取对话内容
+        # 添加基本上下文信息
+        context_info = f"""=== CONVERSATION CONTEXT ===
+        Sample ID: {sample.get('sample_id', 'Unknown')}
+        Participants: {speaker_a} and {speaker_b}
+
+        === FULL CONVERSATION CONTENT ===
+
+        """
+        conversation_texts.append(context_info)
+        current_position = len(context_info)
+        
+        # 统计实际有内容的部分
+        has_actual_conversations = False
+        has_event_summaries = False
+        has_observations = False
+        has_session_summaries = False
+        
+        # 1. 按会话顺序提取实际对话内容
         session_keys = [key for key in conversation.keys() 
-                       if key.startswith('session_') and not key.endswith('_date_time')]
+                    if key.startswith('session_') and not key.endswith('_date_time')]
         session_keys.sort(key=lambda x: int(x.split('_')[1]))
         
         for session_key in session_keys:
@@ -105,61 +654,203 @@ class LoCoMoEntityExtractor:
             session_datetime = conversation.get(f"{session_key}_date_time", "")
             
             if session_messages and session_datetime:
-                conversation_texts.append(f"\n=== {session_key.upper()} ({session_datetime}) ===")
+                has_actual_conversations = True
+                session_header = f"\n=== {session_key.upper()} ({session_datetime}) ===\n"
+                conversation_texts.append(session_header)
+                current_position += len(session_header)
                 
-                for message in session_messages:
+                for msg_idx, message in enumerate(session_messages):
                     if isinstance(message, dict):
-                        speaker = message.get('speaker', 'Unknown')
+                        # 处理结构化消息
+                        speaker = message.get('speaker', '')
                         content = message.get('content', '')
-                        if speaker and content:
-                            conversation_texts.append(f"{speaker}: {content}")
-                    elif isinstance(message, str):
-                        # 有些格式可能是简单的字符串
-                        conversation_texts.append(message)
-        
-        # 添加会话摘要信息
-        session_summary = sample.get('session_summary', {})
-        if session_summary:
-            conversation_texts.append("\n=== SESSION SUMMARIES ===")
-            for summary_key, summary_content in session_summary.items():
-                if isinstance(summary_content, str):
-                    conversation_texts.append(f"{summary_key}: {summary_content}")
-        
-        # 添加事件摘要
-        event_summary = sample.get('event_summary', {})
-        if event_summary:
-            conversation_texts.append("\n=== EVENT SUMMARIES ===")
-            for event_key, event_content in event_summary.items():
-                if isinstance(event_content, dict):
-                    for sub_key, sub_content in event_content.items():
-                        if isinstance(sub_content, str):
-                            conversation_texts.append(f"{event_key}.{sub_key}: {sub_content}")
-        
-        # 添加观察记录
+                        text_content = message.get('text', '')
+                        
+                        actual_content = content or text_content
+                        
+                        if speaker and actual_content:
+                            message_text = f"{speaker}: {actual_content}\n"
+                        elif actual_content:
+                            message_text = f"{actual_content}\n"
+                        else:
+                            continue
+                            
+                        # 记录这条消息的位置
+                        start_pos = current_position
+                        end_pos = current_position + len(message_text)
+                        position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+                            "session": session_key,
+                            "session_datetime": session_datetime,
+                            "speaker": speaker or "Unknown",
+                            "content": actual_content,
+                            "message_index": msg_idx
+                        })
+                        
+                        conversation_texts.append(message_text)
+                        current_position = end_pos
+                        
+                    elif isinstance(message, str) and message.strip():
+                        # 处理纯文本消息
+                        message_text = f"{message}\n"
+                        start_pos = current_position
+                        end_pos = current_position + len(message_text)
+                        position_map[f"{session_key}_msg_{msg_idx}"] = (start_pos, end_pos, {
+                            "session": session_key,
+                            "session_datetime": session_datetime,
+                            "content": message,
+                            "message_index": msg_idx
+                        })
+                        conversation_texts.append(message_text)
+                        current_position = end_pos
+
+        # 2. 添加观察记录 (observation) - 修正这部分
         observations = sample.get('observation', {})
         if observations:
-            conversation_texts.append("\n=== OBSERVATIONS ===")
-            for obs_key, obs_content in observations.items():
-                if isinstance(obs_content, dict):
-                    for sub_key, sub_content in obs_content.items():
-                        if isinstance(sub_content, str):
-                            conversation_texts.append(f"{obs_key}.{sub_key}: {sub_content}")
-        
-        full_text = "\n".join(conversation_texts)
-        
-        # 添加基本上下文信息
-        context_info = f"""
-=== CONVERSATION CONTEXT ===
-Sample ID: {sample.get('sample_id', 'Unknown')}
-Participants: {speaker_a} and {speaker_b}
-Total Sessions: {len(session_keys)}
-Total Messages: {sum(len(conversation.get(key, [])) for key in session_keys)}
+            has_observations = True
+            obs_header = "\n=== OBSERVATIONS ===\n"
+            conversation_texts.append(obs_header)
+            current_position += len(obs_header)
+            
+            # 按session顺序处理观察记录
+            obs_session_keys = [key for key in observations.keys() if key.endswith('_observation')]
+            obs_session_keys.sort(key=lambda x: int(x.split('_')[1]) if x.split('_')[1].isdigit() else 0)
+            
+            for obs_session_key in obs_session_keys:
+                obs_session_data = observations[obs_session_key]
+                if isinstance(obs_session_data, dict) and obs_session_data:
+                    # 提取session编号
+                    session_num = obs_session_key.replace('_observation', '')
+                    obs_section_header = f"\n--- {session_num.upper()} OBSERVATIONS ---\n"
+                    conversation_texts.append(obs_section_header)
+                    current_position += len(obs_section_header)
+                    
+                    # 处理每个说话者的观察记录
+                    for speaker, observations_list in obs_session_data.items():
+                        if isinstance(observations_list, list) and observations_list:
+                            speaker_header = f"\n{speaker} observations:\n"
+                            conversation_texts.append(speaker_header)
+                            current_position += len(speaker_header)
+                            
+                            for obs_idx, observation_item in enumerate(observations_list):
+                                if isinstance(observation_item, list) and len(observation_item) >= 1:
+                                    # 观察记录格式: [观察内容, 证据ID(可选)]
+                                    obs_content = observation_item[0] if observation_item[0] else ""
+                                    evidence_id = observation_item[1] if len(observation_item) > 1 else ""
+                                    
+                                    if obs_content.strip():
+                                        if evidence_id:
+                                            obs_text = f"  • {obs_content} (Evidence: {evidence_id})\n"
+                                        else:
+                                            obs_text = f"  • {obs_content}\n"
+                                        
+                                        start_pos = current_position
+                                        end_pos = current_position + len(obs_text)
+                                        position_map[f"{obs_session_key}_{speaker}_{obs_idx}"] = (start_pos, end_pos, {
+                                            "type": "observation",
+                                            "session": session_num,
+                                            "speaker": speaker,
+                                            "content": obs_content,
+                                            "evidence_id": evidence_id,
+                                            "observation_index": obs_idx
+                                        })
+                                        conversation_texts.append(obs_text)
+                                        current_position = end_pos
+                                elif isinstance(observation_item, str) and observation_item.strip():
+                                    # 简单字符串格式的观察记录
+                                    obs_text = f"  • {observation_item}\n"
+                                    start_pos = current_position
+                                    end_pos = current_position + len(obs_text)
+                                    position_map[f"{obs_session_key}_{speaker}_{obs_idx}"] = (start_pos, end_pos, {
+                                        "type": "observation",
+                                        "session": session_num,
+                                        "speaker": speaker,
+                                        "content": observation_item,
+                                        "observation_index": obs_idx
+                                    })
+                                    conversation_texts.append(obs_text)
+                                    current_position = end_pos
 
-=== FULL CONVERSATION CONTENT ===
-{full_text}
-"""
+        # 3. 添加事件摘要信息 (event_summary)
+        event_summary = sample.get('event_summary', {})
+        if event_summary:
+            has_event_summaries = True
+            event_header = "\n=== EVENT SUMMARIES ===\n"
+            conversation_texts.append(event_header)
+            current_position += len(event_header)
+            
+            for event_key in sorted(event_summary.keys()):
+                event_data = event_summary[event_key]
+                if isinstance(event_data, dict):
+                    event_date = event_data.get('date', '')
+                    if event_date:
+                        date_text = f"\n--- {event_key.upper()} ({event_date}) ---\n"
+                        conversation_texts.append(date_text)
+                        current_position += len(date_text)
+                    
+                    # 处理每个说话者的事件
+                    for speaker, events in event_data.items():
+                        if speaker != 'date' and isinstance(events, list) and events:
+                            speaker_header = f"\n{speaker} events:\n"
+                            conversation_texts.append(speaker_header)
+                            current_position += len(speaker_header)
+                            
+                            for event_idx, event_desc in enumerate(events):
+                                if isinstance(event_desc, str) and event_desc.strip():
+                                    event_text = f"  • {event_desc}\n"
+                                    start_pos = current_position
+                                    end_pos = current_position + len(event_text)
+                                    position_map[f"{event_key}_{speaker}_{event_idx}"] = (start_pos, end_pos, {
+                                        "type": "event_summary",
+                                        "session": event_key,
+                                        "date": event_date,
+                                        "speaker": speaker,
+                                        "content": event_desc,
+                                        "event_index": event_idx
+                                    })
+                                    conversation_texts.append(event_text)
+                                    current_position = end_pos
         
-        return context_info
+        # 4. 添加会话摘要信息 (session_summary)
+        session_summary = sample.get('session_summary', {})
+        if session_summary:
+            has_session_summaries = True
+            summary_header = "\n=== SESSION SUMMARIES ===\n"
+            conversation_texts.append(summary_header)
+            current_position += len(summary_header)
+            
+            for summary_key in sorted(session_summary.keys()):
+                summary_content = session_summary[summary_key]
+                if isinstance(summary_content, str) and summary_content.strip():
+                    summary_text = f"\n{summary_key}: {summary_content}\n\n"
+                    start_pos = current_position
+                    end_pos = current_position + len(summary_text)
+                    position_map[f"summary_{summary_key}"] = (start_pos, end_pos, {
+                        "type": "session_summary",
+                        "key": summary_key,
+                        "content": summary_content
+                    })
+                    conversation_texts.append(summary_text)
+                    current_position = end_pos
+        
+        # 5. 添加数据来源说明
+        data_sources = []
+        if has_actual_conversations:
+            data_sources.append("实际对话记录")
+        if has_observations:
+            data_sources.append("观察记录")
+        if has_event_summaries:
+            data_sources.append("事件摘要")
+        if has_session_summaries:
+            data_sources.append("会话摘要")
+        
+        if not data_sources:
+            data_sources.append("无有效内容")
+        
+        data_source_info = f"\n=== 数据来源说明 ===\n本样本包含: {', '.join(data_sources)}\n"
+        conversation_texts.append(data_source_info)
+        
+        full_text = "".join(conversation_texts)
+        return full_text, position_map
     
     def extract_entities_and_relations_for_sample(self, 
                                                 sample_id: str, 
@@ -191,8 +882,10 @@ Total Messages: {sum(len(conversation.get(key, [])) for key in session_keys)}
         print(f"📊 样本信息: {sample_info}")
         
         # 4. 提取完整对话文本
+        # print("\n=== 提取完整对话文本 ===")
+        # full_conversation_text = self._extract_full_conversation_text(sample)
         print("\n=== 提取完整对话文本 ===")
-        full_conversation_text = self._extract_full_conversation_text(sample)
+        full_conversation_text, position_map = self._extract_full_conversation_text(sample)
         
         # 保存原始文本
         if save_intermediate:
@@ -209,10 +902,24 @@ Total Messages: {sum(len(conversation.get(key, [])) for key in session_keys)}
         try:
             if use_chunking:
                 print("使用智能分块处理长文本...")
-                entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations_chunked(full_conversation_text)
+                entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations_chunked_with_position(
+                    full_conversation_text, position_map
+                )
             else:
                 print("使用直接处理方式...")
-                entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations(full_conversation_text)
+                entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations_with_position(
+                    full_conversation_text, position_map
+                )
+        ## 5. 使用带位置追踪的EntityRelationExtractor进行实体关系抽取
+        # print(f"\n=== 开始实体关系抽取 ===")
+        
+        # try:
+        #     if use_chunking:
+        #         print("使用智能分块处理长文本...")
+        #         entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations_chunked(full_conversation_text)
+        #     else:
+        #         print("使用直接处理方式...")
+        #         entities, relationships, content_keywords = self.entity_extractor.extract_entities_and_relations(full_conversation_text)
             
             print(f"✅ 实体关系抽取完成!")
             print(f"   抽取实体数: {len(entities)}")
@@ -651,436 +1358,3 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-
-# import sys
-# import json
-# import logging
-# from pathlib import Path
-# from typing import Dict, Any, Optional
-# from datetime import datetime
-
-# # 添加项目根目录到Python路径
-# sys.path.append(str(Path(__file__).parent.parent.parent))
-
-# from dev.semantic_graph import SemanticGraph
-# from dev.memory_unit import MemoryUnit
-# from benchmark.llm_utils.llm_client import LLMClient
-# from benchmark.extractor.entity_relation_extractor import EntityRelationExtractor
-# from benchmark.extractor.semantic_graph_integrator import SemanticGraphIntegrator
-# from benchmark.task_eval.locomo_test_split import load_dataset, ingest_conversation_history
-
-# class SingleSampleProcessor:
-#     """单个样本处理器 - 专门处理单个sample_id的知识图谱构建"""
-    
-#     def __init__(self, dataset_path: str, output_base_dir: str = None):
-#         self.dataset_path = Path(dataset_path)
-#         self.output_base_dir = Path(output_base_dir) if output_base_dir else Path(__file__).parent.parent / "results"
-#         self.raw_data = None
-        
-#         # 加载数据集
-#         self._load_dataset()
-        
-#     def _load_dataset(self):
-#         """加载数据集"""
-#         logging.info(f"加载数据集: {self.dataset_path}")
-#         self.raw_data = load_dataset(self.dataset_path)
-#         if not self.raw_data:
-#             raise ValueError("数据集加载失败")
-#         logging.info(f"成功加载 {len(self.raw_data)} 个样本")
-    
-#     def list_available_samples(self) -> list:
-#         """列出所有可用的sample_id"""
-#         sample_ids = []
-#         for sample in self.raw_data:
-#             sample_id = sample.get('sample_id')
-#             if sample_id:
-#                 sample_ids.append(sample_id)
-#         return sample_ids
-    
-#     def get_sample_info(self, sample_id: str) -> Dict[str, Any]:
-#         """获取指定样本的基本信息"""
-#         sample = self._find_sample(sample_id)
-#         if not sample:
-#             return {}
-        
-#         conversation = sample.get('conversation', {})
-#         speaker_a = conversation.get('speaker_a', 'Unknown')
-#         speaker_b = conversation.get('speaker_b', 'Unknown')
-        
-#         # 统计会话数量
-#         session_count = sum(1 for key in conversation.keys() 
-#                            if key.startswith('session_') and not key.endswith('_date_time'))
-        
-#         # 统计实际对话内容
-#         total_messages = 0
-#         for key, value in conversation.items():
-#             if key.startswith('session_') and not key.endswith('_date_time') and isinstance(value, list):
-#                 total_messages += len(value)
-        
-#         return {
-#             "sample_id": sample_id,
-#             "speakers": [speaker_a, speaker_b],
-#             "session_count": session_count,
-#             "total_messages": total_messages,
-#             "qa_count": len(sample.get('qa', [])),
-#             "event_summary_count": len(sample.get('event_summary', {})),
-#             "observation_count": len(sample.get('observation', {})),
-#             "session_summary_count": len(sample.get('session_summary', {}))
-#         }
-    
-#     def _find_sample(self, sample_id: str) -> Optional[dict]:
-#         """查找指定的样本"""
-#         for sample in self.raw_data:
-#             if sample.get('sample_id') == sample_id:
-#                 return sample
-#         return None
-    
-#     def process_single_sample(self, 
-#                             sample_id: str, 
-#                             max_units: int = 50,
-#                             save_intermediate: bool = True) -> Dict[str, Any]:
-#         """
-#         处理单个样本，构建知识图谱
-        
-#         Args:
-#             sample_id: 样本ID
-#             max_units: 最大处理单元数
-#             save_intermediate: 是否保存中间结果
-#         """
-        
-#         print(f"🚀 开始处理样本: {sample_id}")
-        
-#         # 1. 查找样本
-#         sample = self._find_sample(sample_id)
-#         if not sample:
-#             raise ValueError(f"未找到sample_id为{sample_id}的样本")
-        
-#         # 2. 创建输出目录
-#         output_dir = self.output_base_dir / f"{sample_id}_knowledge_graph_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#         output_dir.mkdir(parents=True, exist_ok=True)
-#         self._setup_logging(output_dir)
-        
-#         # 3. 获取样本信息
-#         sample_info = self.get_sample_info(sample_id)
-#         print(f"📊 样本信息: {sample_info}")
-        
-#         # 4. 初始化语义图
-#         print("\n=== 初始化语义图 ===")
-#         graph = SemanticGraph()
-        
-#         # 5. 注入对话数据
-#         print("=== 注入对话数据到语义图 ===")
-#         total_messages = ingest_conversation_history(graph, [sample])
-#         print(f"✅ 成功注入 {total_messages} 个对话消息")
-        
-#         # 保存原始对话图
-#         if save_intermediate:
-#             original_graph_path = output_dir / "01_original_conversations_graph"
-#             graph.save_graph(str(original_graph_path))
-#             print(f"💾 原始对话图已保存到: {original_graph_path}")
-        
-#         # 6. 构建初始索引
-#         print("=== 构建语义图索引 ===")
-#         graph.build_semantic_map_index()
-        
-#         # 7. 显示图谱基本信息
-#         print("\n=== 语义图基本信息 ===")
-#         graph.display_graph_summary()
-        
-#         # 8. 实体关系抽取
-#         print(f"\n=== 开始实体关系抽取（最多处理{max_units}个单元）===")
-#         integrator = SemanticGraphIntegrator(graph)
-        
-#         # 定义过滤器：只处理当前样本的对话内容
-#         def sample_dialog_filter(unit):
-#             return (unit.metadata.get('data_source') == 'locomo_dialog' 
-#                     and unit.metadata.get('conversation_id') == sample_id
-#                     and not unit.metadata.get('entities_extracted', False))
-        
-#         # 批量抽取实体关系
-#         extraction_results = integrator.batch_extract_entities_from_space(
-#             space_name="locomo_dialogs",
-#             max_units=max_units,
-#             unit_filter=sample_dialog_filter
-#         )
-        
-#         print(f"✅ 实体关系抽取完成!")
-#         print(f"   处理单元数: {extraction_results.get('processed', 0)}")
-#         print(f"   跳过单元数: {extraction_results.get('skipped', 0)}")
-#         print(f"   失败单元数: {extraction_results.get('failed', 0)}")
-#         print(f"   总抽取实体数: {extraction_results.get('total_entities', 0)}")
-#         print(f"   总抽取关系数: {extraction_results.get('total_relationships', 0)}")
-        
-#         # 9. 获取详细统计信息
-#         print("\n=== 生成统计信息 ===")
-#         entity_stats = integrator.get_entity_statistics()
-#         print(f"实体类型分布: {entity_stats.get('entity_types', {})}")
-#         print(f"关系类型分布: {entity_stats.get('relationship_types', {})}")
-        
-#         # 10. 保存最终知识图谱
-#         print("\n=== 保存知识图谱 ===")
-#         final_graph_path = output_dir / f"{sample_id}_final_knowledge_graph"
-#         graph.save_graph(str(final_graph_path))
-#         print(f"✅ 知识图谱已保存到: {final_graph_path}")
-        
-#         # 11. 保存详细统计报告
-#         final_summary = {
-#             "sample_info": sample_info,
-#             "processing_info": {
-#                 "timestamp": str(datetime.now()),
-#                 "max_units_processed": max_units,
-#                 "total_messages_ingested": total_messages
-#             },
-#             "extraction_results": extraction_results,
-#             "entity_statistics": entity_stats,
-#             "graph_structure": {
-#                 "total_memory_units": len(graph.semantic_map.memory_units),
-#                 "total_memory_spaces": len(graph.semantic_map.memory_spaces),
-#                 "networkx_nodes": graph.nx_graph.number_of_nodes(),
-#                 "networkx_edges": graph.nx_graph.number_of_edges(),
-#                 "faiss_vectors": graph.semantic_map.faiss_index.ntotal if graph.semantic_map.faiss_index else 0
-#             }
-#         }
-        
-#         summary_file = output_dir / f"{sample_id}_summary.json"
-#         with open(summary_file, 'w', encoding='utf-8') as f:
-#             json.dump(final_summary, f, ensure_ascii=False, indent=2, default=str)
-#         print(f"✅ 处理摘要已保存到: {summary_file}")
-        
-#         # 12. 导出实体和关系示例
-#         print("\n=== 导出实体和关系示例 ===")
-#         self._export_samples(graph, output_dir, sample_id, num_samples=10)
-        
-#         # 13. 显示最终图谱摘要
-#         print("\n=== 最终知识图谱摘要 ===")
-#         graph.display_graph_summary()
-        
-#         return {
-#             "sample_id": sample_id,
-#             "graph": graph,
-#             "extraction_results": extraction_results,
-#             "entity_statistics": entity_stats,
-#             "output_directory": output_dir,
-#             "summary": final_summary
-#         }
-    
-#     def _export_samples(self, graph: SemanticGraph, output_dir: Path, sample_id: str, num_samples: int = 10):
-#         """导出实体和关系示例"""
-        
-#         # 导出实体示例
-#         entities_sample = []
-#         entity_space = graph.semantic_map.get_memory_space("extracted_entities")
-#         if entity_space:
-#             entity_uids = list(entity_space.get_memory_uids())[:num_samples]
-#             for uid in entity_uids:
-#                 unit = graph.get_unit(uid)
-#                 if unit:
-#                     entities_sample.append({
-#                         "uid": uid,
-#                         "name": unit.raw_data.get('entity_name', 'Unknown'),
-#                         "type": unit.raw_data.get('entity_type', 'Unknown'),
-#                         "description": unit.raw_data.get('description', ''),
-#                         "confidence": unit.raw_data.get('confidence', 0.0),
-#                         "source_unit_id": unit.metadata.get('source_unit_id', '')
-#                     })
-        
-#         # 导出关系示例
-#         relationships_sample = []
-#         relationship_count = 0
-#         for source, target, data in graph.nx_graph.edges(data=True):
-#             if relationship_count >= num_samples:
-#                 break
-#             if data.get("source_unit_id"):  # 只导出抽取出的关系
-#                 source_unit = graph.get_unit(source)
-#                 target_unit = graph.get_unit(target)
-                
-#                 relationships_sample.append({
-#                     "source_uid": source,
-#                     "target_uid": target,
-#                     "source_name": source_unit.raw_data.get('entity_name', source) if source_unit else source,
-#                     "target_name": target_unit.raw_data.get('entity_name', target) if target_unit else target,
-#                     "relationship_type": data.get("type", "UNKNOWN"),
-#                     "description": data.get("description", ""),
-#                     "strength": data.get("strength", 0.0),
-#                     "source_unit_id": data.get("source_unit_id", "")
-#                 })
-#                 relationship_count += 1
-        
-#         # 保存示例
-#         samples = {
-#             "sample_id": sample_id,
-#             "entities_sample": entities_sample,
-#             "relationships_sample": relationships_sample,
-#             "total_entities": len(entity_space.get_memory_uids()) if entity_space else 0,
-#             "total_relationships": graph.nx_graph.number_of_edges()
-#         }
-        
-#         samples_file = output_dir / f"{sample_id}_entities_relationships_samples.json"
-#         with open(samples_file, 'w', encoding='utf-8') as f:
-#             json.dump(samples, f, ensure_ascii=False, indent=2)
-        
-#         print(f"✅ 实体关系示例已保存到: {samples_file}")
-#         print(f"📊 实体示例数: {len(entities_sample)}")
-#         print(f"📊 关系示例数: {len(relationships_sample)}")
-    
-#     def _setup_logging(self, output_dir: Path):
-#         """设置日志"""
-#         log_file = output_dir / "processing.log"
-#         logging.basicConfig(
-#             level=logging.INFO,
-#             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-#             handlers=[
-#                 logging.FileHandler(log_file),
-#                 logging.StreamHandler()
-#             ]
-#         )
-    
-#     def batch_process_samples(self, 
-#                             sample_ids: list = None, 
-#                             max_units_per_sample: int = 50) -> Dict[str, Any]:
-#         """
-#         批量处理多个样本
-        
-#         Args:
-#             sample_ids: 要处理的样本ID列表，如果为None则处理所有样本
-#             max_units_per_sample: 每个样本最大处理单元数
-#         """
-        
-#         if sample_ids is None:
-#             sample_ids = self.list_available_samples()
-        
-#         print(f"🚀 开始批量处理 {len(sample_ids)} 个样本")
-        
-#         batch_results = {
-#             "processed_samples": [],
-#             "failed_samples": [],
-#             "total_entities": 0,
-#             "total_relationships": 0,
-#             "start_time": str(datetime.now())
-#         }
-        
-#         for i, sample_id in enumerate(sample_ids):
-#             print(f"\n--- 处理样本 {i+1}/{len(sample_ids)}: {sample_id} ---")
-            
-#             try:
-#                 result = self.process_single_sample(
-#                     sample_id=sample_id,
-#                     max_units=max_units_per_sample,
-#                     save_intermediate=False  # 批量处理时不保存中间结果
-#                 )
-                
-#                 batch_results["processed_samples"].append({
-#                     "sample_id": sample_id,
-#                     "entities": result["extraction_results"].get("total_entities", 0),
-#                     "relationships": result["extraction_results"].get("total_relationships", 0),
-#                     "output_directory": str(result["output_directory"])
-#                 })
-                
-#                 batch_results["total_entities"] += result["extraction_results"].get("total_entities", 0)
-#                 batch_results["total_relationships"] += result["extraction_results"].get("total_relationships", 0)
-                
-#                 print(f"✅ 样本 {sample_id} 处理完成")
-                
-#             except Exception as e:
-#                 print(f"❌ 样本 {sample_id} 处理失败: {e}")
-#                 batch_results["failed_samples"].append({
-#                     "sample_id": sample_id,
-#                     "error": str(e)
-#                 })
-#                 logging.error(f"样本 {sample_id} 处理失败", exc_info=True)
-        
-#         batch_results["end_time"] = str(datetime.now())
-        
-#         # 保存批量处理结果
-#         batch_summary_file = self.output_base_dir / f"batch_processing_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-#         with open(batch_summary_file, 'w', encoding='utf-8') as f:
-#             json.dump(batch_results, f, ensure_ascii=False, indent=2, default=str)
-        
-#         print(f"\n🎊 批量处理完成!")
-#         print(f"✅ 成功处理: {len(batch_results['processed_samples'])} 个样本")
-#         print(f"❌ 失败: {len(batch_results['failed_samples'])} 个样本")
-#         print(f"📊 总实体数: {batch_results['total_entities']}")
-#         print(f"📊 总关系数: {batch_results['total_relationships']}")
-#         print(f"📁 批量摘要已保存到: {batch_summary_file}")
-        
-#         return batch_results
-
-# def main():
-#     """主函数"""
-#     import argparse
-    
-#     parser = argparse.ArgumentParser(description="单个样本知识图谱处理器")
-#     parser.add_argument("--dataset", required=True, help="LoCoMo数据集路径")
-#     parser.add_argument("--sample-id", help="要处理的样本ID")
-#     parser.add_argument("--list-samples", action="store_true", help="列出所有可用的样本ID")
-#     parser.add_argument("--batch", nargs="+", help="批量处理指定的样本ID")
-#     parser.add_argument("--batch-all", action="store_true", help="批量处理所有样本")
-#     parser.add_argument("--max-units", type=int, default=50, help="每个样本最大处理单元数")
-#     parser.add_argument("--output", help="输出目录")
-    
-#     args = parser.parse_args()
-    
-#     try:
-#         # 初始化处理器
-#         processor = SingleSampleProcessor(
-#             dataset_path=args.dataset,
-#             output_base_dir=args.output
-#         )
-        
-#         # 列出所有样本
-#         if args.list_samples:
-#             samples = processor.list_available_samples()
-#             print(f"数据集中包含 {len(samples)} 个样本:")
-#             for i, sample_id in enumerate(samples, 1):
-#                 info = processor.get_sample_info(sample_id)
-#                 print(f"  {i:2d}. {sample_id} - {info['speakers'][0]} & {info['speakers'][1]} "
-#                       f"({info['session_count']} sessions, {info['total_messages']} messages)")
-#             return 0
-        
-#         # 处理单个样本
-#         if args.sample_id:
-#             start_time = datetime.now()
-#             print(f"⏰ 开始时间: {start_time}")
-            
-#             result = processor.process_single_sample(
-#                 sample_id=args.sample_id,
-#                 max_units=args.max_units
-#             )
-            
-#             end_time = datetime.now()
-#             print(f"\n🎉 样本 {args.sample_id} 处理完成!")
-#             print(f"⏰ 完成时间: {end_time}")
-#             print(f"⏱️  总耗时: {end_time - start_time}")
-#             print(f"📁 输出目录: {result['output_directory']}")
-            
-#         # 批量处理指定样本
-#         elif args.batch:
-#             processor.batch_process_samples(
-#                 sample_ids=args.batch,
-#                 max_units_per_sample=args.max_units
-#             )
-            
-#         # 批量处理所有样本
-#         elif args.batch_all:
-#             processor.batch_process_samples(
-#                 sample_ids=None,
-#                 max_units_per_sample=args.max_units
-#             )
-            
-#         else:
-#             print("请指定要执行的操作:")
-#             print("  --list-samples: 列出所有样本")
-#             print("  --sample-id SAMPLE_ID: 处理单个样本")
-#             print("  --batch SAMPLE1 SAMPLE2 ...: 批量处理指定样本")
-#             print("  --batch-all: 批量处理所有样本")
-#             return 1
-        
-#     except Exception as e:
-#         logging.error(f"执行失败: {e}", exc_info=True)
-#         print(f"❌ 执行失败: {e}")
-#         return 1
-    
-#     return 0
-
-# if __name__ == "__main__":
-#     exit(main())

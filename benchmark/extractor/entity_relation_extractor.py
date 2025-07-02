@@ -249,6 +249,352 @@ class EntityRelationExtractor:
         return template
  
     # 修改 extract_entities_and_relations 方法
+    def extract_entities_and_relations_with_position(self, text: str, position_map: Dict[str, Tuple[int, int]] = None, max_retries: int = 3) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """
+        从文本中抽取实体和关系，并追踪源位置
+        """
+        if not text or not text.strip():
+            logging.warning("输入文本为空，跳过实体关系抽取")
+            return [], [], []
+        
+        # 检查文本长度
+        estimated_tokens = self.estimate_token_count(text)
+        
+        if estimated_tokens > 60000:
+            logging.info(f"文本过长({estimated_tokens} tokens)，使用分块处理")
+            return self.extract_entities_and_relations_chunked_with_position(text, position_map, max_retries)
+        
+        # 正常处理流程
+        prompt = self._load_prompt_template(
+            input_text=text,
+            entity_types=str(self.entity_types)
+        )
+        
+        for attempt in range(max_retries):
+            try:
+                max_tokens = min(4000, max(1000, estimated_tokens // 10))
+                
+                response = self.llm_client.generate_answer(
+                    prompt=prompt,
+                    temperature=0.1,
+                    max_tokens=max_tokens
+                )
+                # TODO: 如果使用deepseek-chat，可以启用JSON响应格式,但是也要相应修改处理response的逻辑
+                # response = self.llm_client.generate_answer(
+                #     prompt=prompt,
+                #     temperature=0.1,
+                #     max_tokens=max_tokens,
+                #     json_response=True  # 使用JSON响应格式
+                # )
+
+                logging.info(f"LLM响应 (尝试 {attempt + 1}): {response[:500]}...")
+                
+                entities, relationships, content_keywords = self._parse_llm_response_with_position(
+                    response, text, position_map
+                )
+                
+                if entities or relationships:
+                    logging.info(f"成功抽取 {len(entities)} 个实体, {len(relationships)} 个关系")
+                    return entities, relationships, content_keywords
+                    
+            except Exception as e:
+                logging.error(f"实体关系抽取第 {attempt + 1} 次尝试失败: {e}")
+                if attempt == max_retries - 1:
+                    logging.error("实体关系抽取最终失败")
+        
+        return [], [], []
+    
+    def _parse_llm_response_with_position(self, response: str, source_text: str, position_map: Dict[str, Tuple[int, int]] = None) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """解析JSON格式的LLM响应，并追踪源位置"""
+        entities = []
+        relationships = []
+        content_keywords = []
+        
+        try:
+            # 清理响应，提取JSON部分
+            cleaned_response = self._extract_json_from_response(response)
+            
+            # 解析JSON
+            data = json.loads(cleaned_response)
+            
+            # 解析实体
+            if "entities" in data:
+                for entity_data in data["entities"]:
+                    try:
+                        entity_name = entity_data.get("name", "").strip()
+                        
+                        # 寻找实体在原文中的位置
+                        source_info = self._find_entity_source_position(entity_name, source_text, position_map)
+                        
+                        entity = Entity(
+                            name=entity_name,
+                            entity_type=self._normalize_entity_type(entity_data.get("type", "").strip()),
+                            description=entity_data.get("description", "").strip(),
+                            source_text=source_info["source_text"],
+                            confidence=0.8
+                        )
+                        if entity.name and entity.entity_type:
+                            entities.append(entity)
+                    except Exception as e:
+                        logging.warning(f"解析实体失败: {entity_data} - {e}")
+            
+            # 解析关系
+            if "relationships" in data:
+                for rel_data in data["relationships"]:
+                    try:
+                        source_entity = rel_data.get("source", "").strip()
+                        target_entity = rel_data.get("target", "").strip()
+                        
+                        # 寻找关系在原文中的位置（基于两个实体）
+                        source_info = self._find_relationship_source_position(
+                            source_entity, target_entity, source_text, position_map
+                        )
+                        
+                        relationship = Relationship(
+                            source_entity=source_entity,
+                            target_entity=target_entity,
+                            relationship_type=self._normalize_relationship_type(rel_data.get("type", "").strip()),
+                            description=rel_data.get("description", "").strip(),
+                            keywords=[rel_data.get("type", "").lower()],
+                            strength=float(rel_data.get("strength", 0.5)),
+                            source_text=source_info["source_text"]
+                        )
+                        if relationship.source_entity and relationship.target_entity:
+                            relationships.append(relationship)
+                    except Exception as e:
+                        logging.warning(f"解析关系失败: {rel_data} - {e}")
+            
+            # 解析关键词
+            if "keywords" in data:
+                content_keywords = [kw.strip() for kw in data["keywords"] if isinstance(kw, str) and kw.strip()]
+            
+            logging.info(f"JSON解析成功: {len(entities)} 个实体, {len(relationships)} 个关系")
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON解析失败: {e}")
+            logging.debug(f"原始响应: {response}")
+            return self._parse_llm_response_fallback(response, source_text)
+        except Exception as e:
+            logging.error(f"响应解析异常: {e}")
+            return [], [], []
+        
+        return entities, relationships, content_keywords
+
+    def _find_entity_source_position(self, entity_name: str, full_text: str, position_map: Dict[str, Tuple[int, int]] = None) -> Dict[str, str]:
+        """寻找实体在原文中的具体位置"""
+        if not position_map:
+            return {"source_text": full_text[:200] + "..." if len(full_text) > 200 else full_text}
+        
+        # 在完整文本中搜索实体名称
+        entity_positions = []
+        start = 0
+        while True:
+            pos = full_text.find(entity_name, start)
+            if pos == -1:
+                break
+            entity_positions.append(pos)
+            start = pos + 1
+        
+        if not entity_positions:
+            return {"source_text": f"实体 '{entity_name}' 未在原文中找到"}
+        
+        # 为每个找到的位置，确定它属于哪个消息片段
+        best_match = None
+        for entity_pos in entity_positions:
+            for segment_key, (start_pos, end_pos, metadata) in position_map.items():
+                if start_pos <= entity_pos < end_pos:
+                    # 提取包含实体的具体对话片段
+                    segment_text = full_text[start_pos:end_pos].strip()
+                    
+                    source_info = {
+                        "source_text": segment_text,
+                        "segment_key": segment_key,
+                        "position": entity_pos - start_pos,
+                        **metadata
+                    }
+                    
+                    # 优先选择会话对话而不是摘要
+                    if segment_key.startswith('session_') and 'msg_' in segment_key:
+                        best_match = source_info
+                        break
+                    elif not best_match:
+                        best_match = source_info
+            
+            if best_match and best_match.get("segment_key", "").startswith('session_'):
+                break
+        
+        if best_match:
+            return best_match
+        else:
+            return {"source_text": full_text[:200] + "..." if len(full_text) > 200 else full_text}
+
+    def _find_relationship_source_position(self, source_entity: str, target_entity: str, full_text: str, position_map: Dict[str, Tuple[int, int]] = None) -> Dict[str, str]:
+        """寻找关系在原文中的具体位置"""
+        if not position_map:
+            return {"source_text": full_text[:200] + "..." if len(full_text) > 200 else full_text}
+        
+        # 寻找同时包含两个实体的文本片段
+        best_match = None
+        best_score = 0
+        
+        for segment_key, (start_pos, end_pos, metadata) in position_map.items():
+            segment_text = full_text[start_pos:end_pos]
+            
+            # 计算匹配得分
+            score = 0
+            if source_entity.lower() in segment_text.lower():
+                score += 1
+            if target_entity.lower() in segment_text.lower():
+                score += 1
+            
+            # 优先选择会话对话
+            if segment_key.startswith('session_') and 'msg_' in segment_key:
+                score += 0.5
+            
+            if score > best_score:
+                best_score = score
+                best_match = {
+                    "source_text": segment_text.strip(),
+                    "segment_key": segment_key,
+                    "match_score": score,
+                    **metadata
+                }
+        
+        if best_match and best_match.get("match_score", 0) >= 1:
+            return best_match
+        else:
+            # 如果没找到好的匹配，返回包含任一实体的片段
+            for segment_key, (start_pos, end_pos, metadata) in position_map.items():
+                segment_text = full_text[start_pos:end_pos]
+                if (source_entity.lower() in segment_text.lower() or 
+                    target_entity.lower() in segment_text.lower()):
+                    return {
+                        "source_text": segment_text.strip(),
+                        "segment_key": segment_key,
+                        **metadata
+                    }
+            
+            return {"source_text": full_text[:200] + "..." if len(full_text) > 200 else full_text}
+        
+    # 在 EntityRelationExtractor 类中添加以下方法（在 extract_entities_and_relations_chunked 方法之后）
+
+    def extract_entities_and_relations_chunked_with_position(self, text: str, position_map: Dict[str, Tuple[int, int]] = None, max_retries: int = 3) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """
+        从长文本中分块抽取实体和关系，并追踪源位置，然后合并结果
+        """
+        if not text or not text.strip():
+            logging.warning("输入文本为空，跳过实体关系抽取")
+            return [], [], []
+        
+        # 分块处理
+        chunks = self.smart_text_chunking(text, max_tokens=60000)
+        logging.info(f"将文本分为 {len(chunks)} 个块进行处理")
+        
+        all_entities = []
+        all_relationships = []
+        all_keywords = []
+        
+        # 为每个分块创建对应的位置映射
+        chunk_position_maps = self._split_position_map_for_chunks(text, chunks, position_map)
+        
+        for i, (chunk, chunk_position_map) in enumerate(zip(chunks, chunk_position_maps)):
+            logging.info(f"处理第 {i+1}/{len(chunks)} 块，长度: {len(chunk)} 字符")
+            
+            # 对每个块进行实体抽取（带位置追踪）
+            entities, relationships, keywords = self._extract_from_single_chunk_with_position(
+                chunk, chunk_position_map, max_retries=max_retries
+            )
+            
+            all_entities.extend(entities)
+            all_relationships.extend(relationships)
+            all_keywords.extend(keywords)
+        
+        # 合并和去重
+        merged_entities, merged_relationships, merged_keywords = self.merge_extraction_results(
+            all_entities, all_relationships, all_keywords
+        )
+        
+        logging.info(f"合并后结果: {len(merged_entities)} 个实体, {len(merged_relationships)} 个关系")
+        
+        return merged_entities, merged_relationships, merged_keywords
+
+    def _split_position_map_for_chunks(self, full_text: str, chunks: List[str], position_map: Dict[str, Tuple[int, int]] = None) -> List[Dict[str, Tuple[int, int]]]:
+        """
+        为每个文本块创建对应的位置映射
+        
+        Args:
+            full_text: 完整文本
+            chunks: 文本块列表
+            position_map: 原始位置映射
+            
+        Returns:
+            每个块对应的位置映射列表
+        """
+        if not position_map:
+            return [None] * len(chunks)
+        
+        chunk_position_maps = []
+        current_position = 0
+        
+        for chunk in chunks:
+            chunk_map = {}
+            chunk_start = full_text.find(chunk, current_position)
+            chunk_end = chunk_start + len(chunk)
+            
+            # 找出与当前块重叠的位置映射项
+            for segment_key, (start_pos, end_pos, metadata) in position_map.items():
+                # 检查是否与当前块有重叠
+                if not (end_pos <= chunk_start or start_pos >= chunk_end):
+                    # 计算在块内的相对位置
+                    relative_start = max(0, start_pos - chunk_start)
+                    relative_end = min(len(chunk), end_pos - chunk_start)
+                    
+                    if relative_end > relative_start:
+                        chunk_map[segment_key] = (relative_start, relative_end, metadata)
+            
+            chunk_position_maps.append(chunk_map if chunk_map else None)
+            current_position = chunk_end
+        
+        return chunk_position_maps
+
+    def _extract_from_single_chunk_with_position(self, text: str, position_map: Dict[str, Tuple[int, int]] = None, max_retries: int = 3) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """
+        从单个文本块中抽取实体和关系，并追踪源位置
+        """
+        prompt = self._load_prompt_template(
+            input_text=text,
+            entity_types=str(self.entity_types)
+        )
+        
+        estimated_tokens = self.estimate_token_count(text)
+        
+        for attempt in range(max_retries):
+            try:
+                max_tokens = min(4000, max(1000, estimated_tokens // 10))
+                
+                response = self.llm_client.generate_answer(
+                    prompt=prompt,
+                    temperature=0.1,
+                    max_tokens=max_tokens
+                )
+
+                logging.info(f"LLM响应 (尝试 {attempt + 1}): {response[:500]}...")
+                
+                entities, relationships, content_keywords = self._parse_llm_response_with_position(
+                    response, text, position_map
+                )
+                
+                if entities or relationships:
+                    logging.info(f"成功抽取 {len(entities)} 个实体, {len(relationships)} 个关系")
+                    return entities, relationships, content_keywords
+                    
+            except Exception as e:
+                logging.error(f"实体关系抽取第 {attempt + 1} 次尝试失败: {e}")
+                if attempt == max_retries - 1:
+                    logging.error("实体关系抽取最终失败")
+        
+        return [], [], []
+    
     def extract_entities_and_relations(self, text: str, max_retries: int = 3) -> Tuple[List[Entity], List[Relationship], List[str]]:
         """
         从文本中抽取实体和关系，自动处理长文本
@@ -280,14 +626,24 @@ class EntityRelationExtractor:
                 # 根据文本长度调整参数
                 max_tokens = min(4000, max(1000, estimated_tokens // 10))
                 
+                # response = self.llm_client.generate_answer(
+                #     prompt=prompt,
+                #     temperature=0.1,
+                #     max_tokens=max_tokens,
+                #     # json_response=True  # 使用JSON响应格式
+                # )
+
+                # TODO: 如果使用deepseek-chat，可以启用JSON响应格式,但是也要相应修改处理response的逻辑
                 response = self.llm_client.generate_answer(
                     prompt=prompt,
                     temperature=0.1,
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
+                    json_response=True  # 使用JSON响应格式
                 )
 
                 logging.info(f"LLM响应 (尝试 {attempt + 1}): {response[:500]}...")
                 
+                # entities, relationships, content_keywords = self._parse_llm_response(response, text)
                 entities, relationships, content_keywords = self._parse_llm_response(response, text)
                 
                 if entities or relationships:
@@ -308,11 +664,14 @@ class EntityRelationExtractor:
         content_keywords = []
         
         try:
-            # 清理响应，提取JSON部分
-            cleaned_response = self._extract_json_from_response(response)
-            
+            # # 清理响应，提取JSON部分
+            # 使用新接口后不需要提取JSON部分，直接使用响应内容
+            # cleaned_response = self._extract_json_from_response(response)
+            # # 解析JSON
+            # data = json.loads(cleaned_response)
+
             # 解析JSON
-            data = json.loads(cleaned_response)
+            data = json.loads(response)
             
             # 解析实体
             if "entities" in data:
