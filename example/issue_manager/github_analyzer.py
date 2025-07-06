@@ -408,7 +408,16 @@ class GitHubImporter:
                 pr_id = f"github_pr_{search_result.group(1)}"
                 print(f"commit {commit_uid} -> pr {pr_id}")
                 if not self.sgraph.semantic_map.get_unit(pr_id):
-                    pr = self.repo.get_pull(int(search_result.group(1)))
+                    try:
+                        pr = self.repo.get_pull(int(search_result.group(1)))
+                    except GithubException as e:
+                        if e.status == 404:
+                            logging.warning(
+                                f"PR {search_result.group(1)} not found, skip."
+                            )
+                            continue
+                        else:
+                            raise
                     data = GithubParser.parse_github_pr(pr)
                     unit = MemoryUnit(uid=pr_id, raw_data=data)
                     self.sgraph.add_unit(unit)
@@ -435,16 +444,30 @@ class GitHubImporter:
         prs = self.ms_prs.get_all_units()
         for pr in prs:
             pr_uid = pr.uid
-            pull_request = self.repo.get_pull(int(pr.uid[10:]))
+            try:
+                pull_request = self.repo.get_pull(int(pr.uid[10:]))
+            except GithubException as e:
+                if e.status == 404:
+                    logging.warning(f"PR {pr.uid[10:]} not found, skip.")
+                    continue
+                else:
+                    raise
             # 修复Issue
             issue_ids = self._parse_closed_issues(pull_request.body)
             for issue in issue_ids:
                 issue_uid = f"github_issue_{issue}"
                 print(f"pr {pr_uid} -> issue {issue_uid}")
                 if not self.sgraph.semantic_map.get_unit(issue_uid):
-                    issue_data = GithubParser.parse_github_issue(
-                        self.repo.get_issue(issue)
-                    )
+                    try:
+                        issue_data = GithubParser.parse_github_issue(
+                            self.repo.get_issue(issue)
+                        )
+                    except GithubException as e:
+                        if e.status == 404:
+                            logging.warning(f"issue {issue} not found, skip.")
+                            continue
+                        else:
+                            raise
                     unit = MemoryUnit(uid=issue_uid, raw_data=issue_data)
                     self.sgraph.add_unit(unit)
                 self.sgraph.add_unit(pr)
@@ -483,7 +506,14 @@ class GitHubImporter:
             for commit_sha in pr.raw_data["commits"]:
                 commit_uid = f"github_commit_{commit_sha}"
                 if not self.sgraph.semantic_map.get_unit(commit_uid):
-                    repo_commit = self.repo.get_commit(commit_sha)
+                    try:
+                        repo_commit = self.repo.get_commit(commit_sha)
+                    except GithubException as e:
+                        if e.status == 404:
+                            logging.warning(f"commit {commit_sha} not found, skip.")
+                            continue
+                        else:
+                            raise
                     data = GithubParser.parse_github_commit(repo_commit)
                     unit = MemoryUnit(uid=commit_uid, raw_data=data)
                     self.sgraph.add_unit(unit)
@@ -544,7 +574,14 @@ class GitHubImporter:
                     match = re.search(pattern, comment.body)
                     if match:
                         pr_num = match.group(1)
-                        pr = self.repo.get_pull(int(pr_num))
+                        try:
+                            pr = self.repo.get_pull(int(pr_num))
+                        except GithubException as e:
+                            if e.status == 404:
+                                logging.warning(f"PR {pr_num} not found, skip.")
+                                continue
+                            else:
+                                raise
                         pr_uid = f"github_pr_{pr_num}"
                         print(f"pr {pr_uid} -> issue {issue.uid}")
                         if not self.sgraph.semantic_map.get_unit(pr_uid):
@@ -561,6 +598,85 @@ class GitHubImporter:
                                 "merged_at": pr.merged_at,
                             },
                         )
+
+        # === 评论关系 ===
+        comments = self.ms_comments.get_all_units()
+        for comment in comments:
+            user = comment.raw_data.get("user")
+            # 用户→评论
+            if user:
+                user_uid = f"github_contributor_{user}"
+                if self.sgraph.semantic_map.get_unit(user_uid):
+                    self.sgraph.add_unit(comment)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=user_uid,
+                        tgt_uid=comment.uid,
+                        rel_type="authored_comment",
+                    )
+            # 评论→Issue
+            if "issue" in comment.uid:
+                # 约定comment_uid = github_comment_{issue_number}_{idx}
+                issue_num = comment.uid.split("_")[2]
+                issue_uid = f"github_issue_{issue_num}"
+                if self.sgraph.semantic_map.get_unit(issue_uid):
+                    self.sgraph.add_unit(comment)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=comment.uid,
+                        tgt_uid=issue_uid,
+                        rel_type="comment_on_issue",
+                    )
+            # 评论→PR
+            elif "pr" in comment.uid:
+                pr_num = comment.uid.split("_")[2]
+                pr_uid = f"github_pr_{pr_num}"
+                if self.sgraph.semantic_map.get_unit(pr_uid):
+                    self.sgraph.add_unit(comment)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=comment.uid,
+                        tgt_uid=pr_uid,
+                        rel_type="comment_on_pr",
+                    )
+            # 评论→Commit
+            elif "commit" in comment.uid:
+                commit_sha = comment.uid.split("_")[2]
+                commit_uid = f"github_commit_{commit_sha}"
+                if self.sgraph.semantic_map.get_unit(commit_uid):
+                    self.sgraph.add_unit(comment)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=comment.uid,
+                        tgt_uid=commit_uid,
+                        rel_type="comment_on_commit",
+                    )
+
+        # === Review关系 ===
+        reviews = self.ms_reviews.get_all_units()
+        for review in reviews:
+            user = review.raw_data.get("user")
+            pr_num = None
+            # Review与PR的uid推断
+            if "review" in review.uid:
+                # github_review_{pr_number}_{idx}
+                pr_num = review.uid.split("_")[2]
+            # 用户→Review
+            if user:
+                user_uid = f"github_contributor_{user}"
+                if self.sgraph.semantic_map.get_unit(user_uid):
+                    self.sgraph.add_unit(review)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=user_uid,
+                        tgt_uid=review.uid,
+                        rel_type="authored_review",
+                    )
+            # Review→PR
+            if pr_num:
+                pr_uid = f"github_pr_{pr_num}"
+                if self.sgraph.semantic_map.get_unit(pr_uid):
+                    self.sgraph.add_unit(review)
+                    self.sgraph.add_explicit_edge(
+                        src_uid=review.uid,
+                        tgt_uid=pr_uid,
+                        rel_type="review_on_pr",
+                    )
 
 
 # 初始化GitHub客户端
@@ -613,31 +729,26 @@ if __name__ == "__main__":
             text_embedding_model_name="/mnt/data1/home/guozy/gzy/models/clip-ViT-B-32-multilingual-v1",
             update_interval=None,
         )
-        # 传入所有一级MemorySpace
+        # 初始化importer和所有MemorySpace
+        importer = GitHubImporter(smap, None, repo)
+        smap.memory_spaces = [
+            importer.ms_issues,
+            importer.ms_prs,
+            importer.ms_code_files,
+            importer.ms_contributors,
+            importer.ms_commits,
+            importer.ms_reviews,
+            importer.ms_comments,
+        ]
         sgraph = SemanticGraph(
             smap,
-            memory_spaces=[
-                importer.ms_issues,
-                importer.ms_prs,
-                importer.ms_code_files,
-                importer.ms_contributors,
-                importer.ms_commits,
-                importer.ms_reviews,
-                importer.ms_comments,
-            ],
+            memory_spaces=smap.memory_spaces,
         )
-        importer = GitHubImporter(smap, sgraph, repo)
-        importer.import_repo(repo)
+        importer.sgraph = sgraph
+        importer.import_repo(repo, max_item=5)
         importer._build_relationships()
-        # 保存所有MemorySpace和sgraph
-        importer.ms_issues.save(ms_issues_path)
-        importer.ms_prs.save(ms_prs_path)
-        importer.ms_code_files.save(ms_code_files_path)
-        importer.ms_contributors.save(ms_contributors_path)
-        importer.ms_commits.save(ms_commits_path)
-        importer.ms_reviews.save(ms_reviews_path)
-        importer.ms_comments.save(ms_comments_path)
-        sgraph.save_graph(graph_dir, ms_root=importer.ms_repo)
+        smap.save_map(graph_dir)
+        sgraph.save_graph(graph_dir)
         ms_issues = importer.ms_issues
         ms_prs = importer.ms_prs
         ms_code_files = importer.ms_code_files
@@ -647,31 +758,35 @@ if __name__ == "__main__":
         ms_comments = importer.ms_comments
     else:
         print("[模式] 仅从本地文件加载数据...")
-        # 直接加载sgraph和MemorySpace
-        sgraph, ms_root = SemanticGraph.load_graph(graph_dir)
+        sgraph = SemanticGraph.load_graph(graph_dir)
         smap = sgraph.semantic_map
 
-        # 兼容原有变量名
-        def get_space_by_name(ms_root, name):
-            if ms_root is None:
+        def get_space_by_name(spaces, name):
+            if isinstance(spaces, list):
+                for ms in spaces:
+                    found = get_space_by_name(ms, name)
+                    if found:
+                        return found
                 return None
-            if ms_root.name == name:
-                return ms_root
-            for member in ms_root._members.values():
+            ms = spaces
+            if ms is None:
+                return None
+            if ms.name == name:
+                return ms
+            for member in ms._members.values():
                 if isinstance(member, MemorySpace):
                     found = get_space_by_name(member, name)
                     if found:
                         return found
             return None
 
-        ms_issues = get_space_by_name(ms_root, "github_issues")
-        ms_prs = get_space_by_name(ms_root, "github_prs")
-        ms_code_files = get_space_by_name(ms_root, "github_code_files")
-        ms_contributors = get_space_by_name(ms_root, "github_contributors")
-        ms_commits = get_space_by_name(ms_root, "github_commits")
-        ms_reviews = get_space_by_name(ms_root, "github_reviews")
-        ms_comments = get_space_by_name(ms_root, "github_comments")
-        # 构造importer对象
+        ms_issues = get_space_by_name(smap.memory_spaces, "github_issues")
+        ms_prs = get_space_by_name(smap.memory_spaces, "github_prs")
+        ms_code_files = get_space_by_name(smap.memory_spaces, "github_code_files")
+        ms_contributors = get_space_by_name(smap.memory_spaces, "github_contributors")
+        ms_commits = get_space_by_name(smap.memory_spaces, "github_commits")
+        ms_reviews = get_space_by_name(smap.memory_spaces, "github_reviews")
+        ms_comments = get_space_by_name(smap.memory_spaces, "github_comments")
         importer = GitHubImporter(smap, sgraph, repo)
         if ms_issues is not None:
             importer.ms_issues = ms_issues
@@ -688,7 +803,7 @@ if __name__ == "__main__":
         if ms_comments is not None:
             importer.ms_comments = ms_comments
         # 传入所有一级MemorySpace
-        sgraph.memory_spaces = [
+        smap.memory_spaces = [
             importer.ms_issues,
             importer.ms_prs,
             importer.ms_code_files,
@@ -697,84 +812,59 @@ if __name__ == "__main__":
             importer.ms_reviews,
             importer.ms_comments,
         ]
-    # 健壮性检查
-    for attr in [
-        "ms_issues",
-        "ms_prs",
-        "ms_code_files",
-        "ms_contributors",
-        "ms_commits",
-        "ms_reviews",
-        "ms_comments",
-    ]:
-        ms = getattr(importer, attr, None)
-        if ms is None:
-            print(f"[警告] 未找到 {attr}，后续统计和操作可能异常。")
+# 健壮性检查
+for attr in [
+    "ms_issues",
+    "ms_prs",
+    "ms_code_files",
+    "ms_contributors",
+    "ms_commits",
+    "ms_reviews",
+    "ms_comments",
+]:
+    ms = getattr(importer, attr, None)
+    if ms is None:
+        print(f"[警告] 未找到 {attr}，后续统计和操作可能异常。")
 
-    print(smap)
-    # sgraph.build_index()
+print(smap)
+# sgraph.build_index()
 
-    # 打印嵌套结构
-    def print_space(space, indent=0):
-        if space is None:
-            return
-        prefix = "  " * indent
-        print(f"{prefix}{space.name} ({len(space.list_members())} members)")
-        for k in space.list_members():
-            member = space.get(k)
-            if isinstance(member, MemorySpace):
-                print_space(member, indent + 1)
 
-    print("\n[MemorySpace嵌套结构]")
-    for ms in [
-        importer.ms_issues,
-        importer.ms_prs,
-        importer.ms_code_files,
-        importer.ms_contributors,
-        importer.ms_commits,
-        importer.ms_reviews,
-        importer.ms_comments,
-    ]:
-        if ms is not None:
-            print_space(ms)
+def print_space(space, indent=0):
+    if space is None:
+        return
+    prefix = "  " * indent
+    print(f"{prefix}{space.name} ({len(space.list_members())} members)")
+    for k in space.list_members():
+        member = space.get(k)
+        if isinstance(member, MemorySpace):
+            print_space(member, indent + 1)
 
-    print("\n[统计信息]")
-    print(f"SemanticMap 全局unit数: {len(smap.get_all_units())}")
-    print(
-        f"SemanticGraph 节点数: {sgraph.nx_graph.number_of_nodes()}，边数: {sgraph.nx_graph.number_of_edges()}"
-    )
 
-    for ms in [
-        importer.ms_issues,
-        importer.ms_prs,
-        importer.ms_code_files,
-        importer.ms_contributors,
-        importer.ms_commits,
-        importer.ms_reviews,
-        importer.ms_comments,
-    ]:
-        if ms is not None:
-            print(f"{ms.name}: {len(ms.get_all_units())} units")
-            ms.build_index()
-    print(f"用户空间数: {len(importer.user_spaces)}")
+print("\n[MemorySpace嵌套结构]")
+for ms in smap.memory_spaces:
+    if ms is not None:
+        print_space(ms)
 
-    # 测试语义检索
-    query = "如何处理HTTP 404错误"
-    results = smap.search_similarity_units_by_text(query_text=query, top_k=3)
-    print(f"与「{query}」相关的GitHub项目记忆：")
-    for unit, score in results:
-        print(f"[相似度 {score:.5f}] {unit.uid}")
-        print(f"原始数据摘要：{unit.raw_data.get('text_content', '')[:50]}...\n")
+print("\n[统计信息]")
+print(f"SemanticMap 全局unit数: {len(smap.get_all_units())}")
+print(
+    f"SemanticGraph 节点数: {sgraph.nx_graph.number_of_nodes()}，边数: {sgraph.nx_graph.number_of_edges()}"
+)
 
-    # === 保存各MemorySpace ===
-    for ms, path in [
-        (ms_issues, ms_issues_path),
-        (ms_prs, ms_prs_path),
-        (ms_code_files, ms_code_files_path),
-        (ms_contributors, ms_contributors_path),
-        (ms_commits, ms_commits_path),
-        (ms_reviews, ms_reviews_path),
-        (ms_comments, ms_comments_path),
-    ]:
-        if ms is not None:
-            ms.save(path)
+for ms in smap.memory_spaces:
+    if ms is not None:
+        print(f"{ms.name}: {len(ms.get_all_units())} units")
+        ms.build_index()
+print(f"用户空间数: {len(importer.user_spaces)}")
+
+query = "如何处理HTTP 404错误"
+results = smap.search_similarity_units_by_text(query_text=query, top_k=3)
+print(f"与「{query}」相关的GitHub项目记忆：")
+for unit, score in results:
+    print(f"[相似度 {score:.5f}] {unit.uid}")
+    print(f"原始数据摘要：{unit.raw_data.get('text_content', '')[:50]}...\n")
+
+for ms in smap.memory_spaces:
+    if ms is not None:
+        ms.save(os.path.join(graph_dir, f"ms_{ms.name}.pkl"))

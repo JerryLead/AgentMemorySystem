@@ -8,8 +8,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 import networkx as nx
-from collections import Counter
-import random
+import faiss
 
 # 配置日志记录器
 logging.basicConfig(
@@ -80,15 +79,28 @@ class MemorySpace:
     记忆空间 (MemorySpace) 支持嵌套结构，可包含 MemoryUnit 或其他 MemorySpace。
     用户可直接操作 MemorySpace，实现树状/嵌套组织。
     支持局部faiss索引。
+
+    参数说明：
+        ms_name (str): 记忆空间名称。
+        index_factory (可选): 用于自定义faiss索引类型的工厂。支持以下类型：
+            - None（默认）：使用faiss.IndexFlatL2。
+            - 可调用对象（如lambda dim: faiss.IndexFlatIP(dim)）：传入维度，返回faiss索引实例。
+            - 已实例化的faiss索引对象（如faiss.IndexFlatL2(512)）。
+        示例：
+            import faiss
+            ms = MemorySpace("myspace")  # 默认L2索引
+            ms2 = MemorySpace("ipspace", index_factory=lambda dim: faiss.IndexFlatIP(dim))
+            ms3 = MemorySpace("custom", index_factory=faiss.IndexFlatL2(256))
     """
 
-    def __init__(self, ms_name: str):
+    def __init__(self, ms_name: str, index_factory=None):
         if not isinstance(ms_name, str) or not ms_name.strip():
             raise ValueError("记忆空间名称不能为空")
         self.name: str = ms_name
         self._members: Dict[str, Union[MemoryUnit, "MemorySpace"]] = {}
         self._emb_index = None
         self._index_to_unit: Dict[int, MemoryUnit] = {}
+        self._index_factory = index_factory  # 新增：可自定义faiss索引工厂
 
     def __str__(self) -> str:
         return f"MemorySpace(name={self.name}, member_count={len(self._members)})"
@@ -145,15 +157,30 @@ class MemorySpace:
         """返回所有成员（unit或space）的key列表。"""
         return list(self._members.keys())
 
-    def build_index(self, embedding_dim: int = 512):
-        """递归收集所有unit并构建局部faiss索引。"""
-        from faiss import IndexFlatL2
+    def build_index(self, embedding_dim: int = 512, min_unit_threshold: int = 100):
+        """
+        递归收集所有unit并构建局部faiss索引。
+        仅当unit数量大于等于min_unit_threshold时才建立索引，否则不建立。
+        """
+        units = self.get_all_units()
+        if len(units) < min_unit_threshold:
+            self._emb_index = None
+            self._index_to_unit = {}
+            logging.info(f"MemorySpace {self.name} 单元数{len(units)}，未建立索引。")
+            return
 
-        self._emb_index = IndexFlatL2(embedding_dim)
+        if self._index_factory is None:
+            self._emb_index = faiss.IndexFlatL2(embedding_dim)
+        elif callable(self._index_factory):
+            self._emb_index = self._index_factory(embedding_dim)
+        elif hasattr(self._index_factory, "add"):
+            self._emb_index = self._index_factory
+        else:
+            raise ValueError("index_factory必须为None、可调用工厂或faiss索引实例")
         self._index_to_unit = {}
         embeddings = []
         count = 0
-        for unit in self.get_all_units():
+        for unit in units:
             if unit.embedding is not None:
                 embeddings.append(unit.embedding)
                 self._index_to_unit[count] = unit
@@ -166,29 +193,46 @@ class MemorySpace:
         import numpy as np
 
         self._emb_index.add(np.array(embeddings, dtype=np.float32))
+        logging.info(f"MemorySpace {self.name} 建立了索引，单元数{len(units)}。")
 
     def search_similarity_units_by_vector(
         self, query_vector: np.ndarray, top_k: int = 5
     ) -> List[Tuple[MemoryUnit, float]]:
-        if not self._emb_index or self._emb_index.ntotal == 0:
-            raise ValueError(
-                f"Index is empty in MemorySpace {self.name}. Please build index first."
-            )
-        query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
-        D, I = self._emb_index.search(query_vector_np, top_k)
-        results = []
-        for i in range(len(I[0])):
-            idx = int(I[0][i])
-            if I[0][i] == -1:
-                continue
-            unit = self._index_to_unit[idx]
-            results.append((unit, D[0][i]))
-        return results
+        # 如果有索引且索引非空，优先用索引
+        if self._emb_index and getattr(self._emb_index, "ntotal", 0) > 0:
+            query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
+            D, I = self._emb_index.search(query_vector_np, top_k)
+            results = []
+            for i in range(len(I[0])):
+                idx = int(I[0][i])
+                if I[0][i] == -1:
+                    continue
+                unit = self._index_to_unit[idx]
+                results.append((unit, D[0][i]))
+            return results
+        # 否则直接暴力遍历所有unit
+        units = self.get_all_units()
+        if not units:
+            return []
+        sims = []
+        for u in units:
+            if u.embedding is not None:
+                # 余弦相似度
+                a = query_vector.astype(np.float32)
+                b = u.embedding.astype(np.float32)
+                sim = float(
+                    np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+                )
+                sims.append((u, sim))
+        # 取top_k
+        sims.sort(key=lambda x: x[1], reverse=True)
+        return sims[:top_k]
 
     # 可根据需要扩展更多接口，如递归查找、移动成员等
 
     def save(self, file_path: str):
         """将当前MemorySpace对象保存到指定文件"""
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             pickle.dump(self, f)
 
@@ -198,11 +242,64 @@ class MemorySpace:
         with open(file_path, "rb") as f:
             return pickle.load(f)
 
+    @staticmethod
+    def union(*spaces: "MemorySpace") -> List[MemoryUnit]:
+        """
+        返回多个MemorySpace的unit并集（去重，按uid）。
+        用法：MemorySpace.union(ms1, ms2, ...)
+        """
+        seen = set()
+        result = []
+        for ms in spaces:
+            for u in ms.get_all_units():
+                if u.uid not in seen:
+                    seen.add(u.uid)
+                    result.append(u)
+        return result
+
+    @staticmethod
+    def intersection(*spaces: "MemorySpace") -> List[MemoryUnit]:
+        """
+        返回多个MemorySpace的unit交集（按uid）。
+        用法：MemorySpace.intersection(ms1, ms2, ...)
+        """
+        if not spaces:
+            return []
+        sets = [set(u.uid for u in ms.get_all_units()) for ms in spaces]
+        common_uids = set.intersection(*sets)
+        # 取第一个空间的unit对象（可选：可合并属性）
+        first_units = {u.uid: u for u in spaces[0].get_all_units()}
+        return [first_units[uid] for uid in common_uids]
+
+    @staticmethod
+    def difference(ms1: "MemorySpace", ms2: "MemorySpace") -> List[MemoryUnit]:
+        """
+        返回ms1中有而ms2中没有的unit（按uid）。
+        用法：MemorySpace.difference(ms1, ms2)
+        """
+        uids2 = set(u.uid for u in ms2.get_all_units())
+        return [u for u in ms1.get_all_units() if u.uid not in uids2]
+
 
 class SemanticMap:
     """
     语义地图 (SemanticMap) 只负责存储所有不重复的 MemoryUnit，并支持基于相似度的搜索。
-    MemorySpace 由用户独立管理，支持嵌套。
+    统一管理所有MemorySpace（树/嵌套结构），支持全局和局部索引。
+
+    参数说明：
+        image_embedding_model_name (str): 图像嵌入模型名。
+        text_embedding_model_name (str): 文本嵌入模型名。
+        update_interval (int): 自动重建索引的操作计数阈值。
+        index_factory (可选): 用于自定义faiss索引类型的工厂。支持以下类型：
+            - None（默认）：使用faiss.IndexFlatL2。
+            - 可调用对象（如lambda dim: faiss.IndexFlatIP(dim)）：传入维度，返回faiss索引实例。
+            - 已实例化的faiss索引对象（如faiss.IndexFlatL2(512)）。
+        memory_spaces (可选): 传入初始MemorySpace列表。
+        示例：
+            import faiss
+            sm = SemanticMap()  # 默认L2索引
+            sm2 = SemanticMap(index_factory=lambda dim: faiss.IndexFlatIP(dim))
+            sm3 = SemanticMap(index_factory=faiss.IndexFlatL2(256))
     """
 
     DEFAULT_TEXT_EMBEDDING_KEY = "text_content"
@@ -213,10 +310,14 @@ class SemanticMap:
         image_embedding_model_name: str = "clip-ViT-B-32",
         text_embedding_model_name: str = "sentence-transformers/clip-ViT-B-32-multilingual-v1",
         update_interval: Optional[int] = 100,
+        index_factory=None,
+        memory_spaces: Optional[List["MemorySpace"]] = None,  # 新增
     ):
         self._units: Dict[str, MemoryUnit] = {}  # 全局唯一unit
         self._emb_index = None
         self._index_to_unit: Dict[int, MemoryUnit] = {}
+        self._index_factory = index_factory
+        self.memory_spaces: List["MemorySpace"] = memory_spaces or []  # 新增
         if update_interval:
             self._update_interval = update_interval
             self._operation_counter = 0
@@ -297,11 +398,20 @@ class SemanticMap:
     def get_all_units(self) -> List[MemoryUnit]:
         return list(self._units.values())
 
-    def build_index(self):
-        """根据所有unit的embedding重建索引。"""
-        from faiss import IndexFlatL2
-
-        self._emb_index = IndexFlatL2(512)
+    def build_index(self, min_unit_threshold: int = 100):
+        """
+        根据所有unit的embedding重建全局索引，并递归为所有MemorySpace建立索引。
+        小于阈值的空间不建立索引。
+        """
+        # 构建全局索引
+        if self._index_factory is None:
+            self._emb_index = faiss.IndexFlatL2(512)
+        elif callable(self._index_factory):
+            self._emb_index = self._index_factory(512)
+        elif hasattr(self._index_factory, "add"):
+            self._emb_index = self._index_factory
+        else:
+            raise ValueError("index_factory必须为None、可调用工厂或faiss索引实例")
         self._index_to_unit = {}
         embeddings = []
         count = 0
@@ -310,12 +420,21 @@ class SemanticMap:
                 embeddings.append(unit.embedding)
                 self._index_to_unit[count] = unit
                 count += 1
-        if not embeddings:
-            logging.warning("SemanticMap has no valid embeddings to build index.")
-            return
-        import numpy as np
+        if embeddings:
+            import numpy as np
 
-        self._emb_index.add(np.array(embeddings, dtype=np.float32))
+            self._emb_index.add(np.array(embeddings, dtype=np.float32))
+        else:
+            logging.warning("SemanticMap has no valid embeddings to build index.")
+        # 递归为所有memory_spaces及其子空间建立索引
+        for ms in self.memory_spaces:
+            self._recursive_build_index(ms, min_unit_threshold)
+        logging.info("SemanticMap: 全局及所有MemorySpace索引已重建（含阈值过滤）。")
+
+    def _recursive_build_index(self, ms: "MemorySpace", min_unit_threshold: int):
+        ms.build_index(min_unit_threshold=min_unit_threshold)
+        for child in ms.get_all_spaces():
+            self._recursive_build_index(child, min_unit_threshold)
 
     def search_similarity_units_by_vector(
         self, query_vector: np.ndarray, top_k: int = 5
@@ -355,249 +474,7 @@ class SemanticMap:
             return []
         return self.search_similarity_units_by_vector(query_vector, top_k)
 
-    # --- 持久化 ---
-    def save_map(self, dir_path: str):
-        with open(os.path.join(dir_path, "semantic_map.pkl"), "wb") as f:
-            pickle.dump(self, f)
-        logging.info(f"SemanticMap 已保存到 {dir_path}。")
-
-    @classmethod
-    def load_map(cls, file_path: str) -> "SemanticMap":
-        if not os.path.isfile(file_path):
-            raise FileNotFoundError(f"File {file_path} does not exist.")
-        with open(file_path, "rb") as f:
-            loaded_map = pickle.load(f)
-        logging.info(f"SemanticMap 已从 {file_path} 加载。")
-        # 加载后自动重建索引（如果有unit）
-        if hasattr(loaded_map, "build_index"):
-            loaded_map.build_index()
-        return loaded_map
-
-
-class SemanticGraph:
-    """
-    语义图谱 (SemanticGraph) 结合了 SemanticMap 的向量存储/搜索能力和 NetworkX 的图结构管理能力。
-    它存储记忆单元作为节点，并允许在它们之间定义显式的命名关系。
-    查询可以利用显式图遍历和隐式语义相似性。
-    """
-
-    def __init__(
-        self,
-        semantic_map: SemanticMap = None,
-        memory_spaces: Optional[List[MemorySpace]] = None,
-    ):
-        self.semantic_map: SemanticMap = semantic_map if semantic_map else SemanticMap()
-        self.nx_graph: nx.DiGraph = nx.DiGraph()
-        self.rel_types: Set[str] = set()
-        self.memory_spaces: List[MemorySpace] = (
-            memory_spaces or []
-        )  # 用户主动维护的所有ms列表
-        logging.info("SemanticGraph 已初始化。")
-
-    def add_unit(
-        self, unit: MemoryUnit, rebuild_semantic_map_index_immediately: bool = False
-    ):
-        """
-        向图谱添加一个记忆单元 (节点)，并注册到 SemanticMap。
-        """
-        self.semantic_map.register_unit(unit)
-        if rebuild_semantic_map_index_immediately:
-            self.semantic_map.build_index()
-        if self.nx_graph.has_node(unit.uid):
-            logging.warning(
-                f"MemoryUnit {unit.uid} already exists in the graph, skip add."
-            )
-            return
-        self.nx_graph.add_node(unit.uid, raw_data=unit.raw_data, metadata=unit.metadata)
-        logging.debug(f"节点 '{unit.uid}' 已添加到 NetworkX 图。")
-
-    def remove_unit(self, uid: str, rebuild_index_immediately: bool = False):
-        if self.nx_graph.has_node(uid):
-            self.nx_graph.remove_node(uid)
-            logging.debug(f"MemoryUnit {uid} has been removed from NetworkX graph.")
-        else:
-            logging.warning(f"MemoryUnit {uid} does not exist in NetworkX graph.")
-        self.semantic_map.unregister_unit(uid)
-        if rebuild_index_immediately:
-            self.semantic_map.build_index()
-
-    def update_unit(self, unit: MemoryUnit):
-        if self.nx_graph.has_node(unit.uid):
-            # 可根据需要更新节点属性
-            self.nx_graph.nodes[unit.uid]["raw_data"] = unit.raw_data
-            self.nx_graph.nodes[unit.uid]["metadata"] = unit.metadata
-            logging.debug(f"MemoryUnit {unit.uid} 节点属性已更新。")
-        else:
-            logging.warning(f"MemoryUnit {unit.uid} does not exist in NetworkX graph.")
-        self.semantic_map.register_unit(unit)  # 重新注册会覆盖
-
-    def get_unit(self, uid: str) -> Optional[MemoryUnit]:
-        """
-        获取指定uid的MemoryUnit。如果nx_graph中有该节点，则返回semantic_map中的unit，否则返回None。
-        """
-        if self.nx_graph.has_node(uid):
-            return self.semantic_map.get_unit(uid)
-        return None
-
-    def add_explicit_edge(
-        self,
-        src_uid: str,
-        tgt_uid: str,
-        rel_type: str,
-        bidirectional: bool = False,
-        metadata: Dict = None,
-    ):
-        if not self.semantic_map.get_unit(src_uid):
-            raise ValueError(f"Source MemoryUnit {src_uid} does not exist.")
-        if not self.semantic_map.get_unit(tgt_uid):
-            raise ValueError(f"Target MemoryUnit {tgt_uid} does not exist.")
-        if not self.nx_graph.has_node(src_uid):
-            self.nx_graph.add_node(src_uid)
-        if not self.nx_graph.has_node(tgt_uid):
-            self.nx_graph.add_node(tgt_uid)
-        if not metadata:
-            metadata = {}
-        metadata["created"] = datetime.now()
-        edge_attributes = {"type": rel_type, **metadata}
-        self.nx_graph.add_edge(src_uid, tgt_uid, **edge_attributes)
-        logging.info(f"已添加从 '{src_uid}' 到 '{tgt_uid}' 的关系 '{rel_type}'。")
-        if bidirectional:
-            self.nx_graph.add_edge(tgt_uid, src_uid, **edge_attributes)
-            logging.info(
-                f"已添加从 '{tgt_uid}' 到 '{src_uid}' 的双向关系 '{rel_type}'。"
-            )
-        self.rel_types.add(rel_type)
-
-    def delete_explicit_edge(
-        self,
-        source_unit_id: str,
-        target_unit_id: str,
-        relationship_name: Optional[str] = None,
-    ):
-        if not self.nx_graph.has_edge(source_unit_id, target_unit_id):
-            logging.warning(
-                f"节点 '{source_unit_id}' 和 '{target_unit_id}' 之间没有直接边。"
-            )
-            return
-        if relationship_name:
-            edge_data = self.nx_graph.get_edge_data(source_unit_id, target_unit_id)
-            if edge_data and edge_data.get("type") == relationship_name:
-                self.nx_graph.remove_edge(source_unit_id, target_unit_id)
-                logging.info(
-                    f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的关系 '{relationship_name}'。"
-                )
-            else:
-                logging.warning(
-                    f"未找到从 '{source_unit_id}' 到 '{target_unit_id}' 的名为 '{relationship_name}' 的关系。"
-                )
-        else:
-            self.nx_graph.remove_edge(source_unit_id, target_unit_id)
-            logging.info(
-                f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的所有直接关系。"
-            )
-
-    def get_all_units(self) -> List[MemoryUnit]:
-        return self.semantic_map.get_all_units()
-
-    def build_index(self):
-        """重建语义图谱的全局向量索引（调用SemanticMap的build_index）。"""
-        self.semantic_map.build_index()
-        logging.info(
-            "SemanticGraph: 全局向量索引已重建（调用SemanticMap.build_index）。"
-        )
-
-    def get_all_relations(self) -> list:
-        """
-        返回所有已注册的显式关系类型列表。
-        """
-        return list(self.rel_types)
-
-    # --- 持久化 ---
-    def save_graph(self, directory_path: str, ms_root: "MemorySpace" = None):
-        """
-        将 SemanticGraph 的状态保存到指定目录。
-        包括 SemanticMap 的数据、NetworkX 图结构、关系类型和可选的MemorySpace根节点。
-        """
-        os.makedirs(directory_path, exist_ok=True)
-        self.semantic_map.save_map(directory_path)
-        with open(os.path.join(directory_path, "semantic_graph.pkl"), "wb") as f:
-            pickle.dump(self.nx_graph, f)
-        with open(os.path.join(directory_path, "rel_types.pkl"), "wb") as f:
-            pickle.dump(self.rel_types, f)
-        if ms_root is not None:
-            with open(os.path.join(directory_path, "memory_space.pkl"), "wb") as f:
-                pickle.dump(ms_root, f)
-        logging.info(f"SemanticGraph 已保存到 {directory_path}")
-
-    @classmethod
-    def load_graph(cls, directory_path: str):
-        """
-        从指定目录加载 SemanticGraph 的状态。
-        包括 SemanticMap 的数据、NetworkX 图结构、关系类型和可选的MemorySpace根节点。
-        返回: (SemanticGraph实例, ms_root)
-        """
-        if not os.path.isdir(directory_path):
-            raise ValueError(f"Directory {directory_path} does not exist.")
-        semantic_map = SemanticMap.load_map(
-            os.path.join(directory_path, "semantic_map.pkl")
-        )
-        graph_file = os.path.join(directory_path, "semantic_graph.pkl")
-        if not os.path.isfile(graph_file):
-            raise ValueError(f"Graph file {graph_file} does not exist.")
-        with open(graph_file, "rb") as f:
-            nx_graph = pickle.load(f)
-        rel_types_file = os.path.join(directory_path, "rel_types.pkl")
-        if not os.path.isfile(rel_types_file):
-            raise ValueError(f"Rel types file {rel_types_file} does not exist.")
-        with open(rel_types_file, "rb") as f:
-            rel_types = pickle.load(f)
-        ms_root = None
-        ms_path = os.path.join(directory_path, "memory_space.pkl")
-        if os.path.isfile(ms_path):
-            with open(ms_path, "rb") as f:
-                ms_root = pickle.load(f)
-            # 递归注册所有unit到semantic_map
-            if ms_root is not None:
-                semantic_map.register_units_from_space(ms_root, update_embedding=False)
-                semantic_map.build_index()
-        # 补全nx_graph节点（如果有unit但节点缺失）
-        for unit in semantic_map.get_all_units():
-            if not nx_graph.has_node(unit.uid):
-                nx_graph.add_node(
-                    unit.uid, raw_data=unit.raw_data, metadata=unit.metadata
-                )
-        graph_instance = cls(semantic_map)
-        graph_instance.nx_graph = nx_graph
-        graph_instance.rel_types = rel_types
-        logging.info(
-            f"SemanticGraph 已从 '{directory_path}' 加载，并已注册所有unit与重建索引。"
-        )
-        return graph_instance, ms_root
-
-    def display_graph_summary(self):
-        """打印图谱的摘要信息。"""
-        num_map_units = len(self.semantic_map.get_all_units())
-        num_map_indexed = 0
-        emb_index = getattr(self.semantic_map, "_emb_index", None)
-        if emb_index is not None and hasattr(emb_index, "ntotal"):
-            num_map_indexed = emb_index.ntotal
-        # 记忆空间数无法直接统计，略去
-        num_graph_nodes = self.nx_graph.number_of_nodes()
-        num_graph_edges = self.nx_graph.number_of_edges()
-
-        summary = (
-            f"--- SemanticGraph 摘要 ---\n"
-            f"SemanticMap:\n"
-            f"  - 记忆单元总数: {num_map_units}\n"
-            f"  - 已索引向量数: {num_map_indexed}\n"
-            f"NetworkX Graph:\n"
-            f"  - 节点数: {num_graph_nodes}\n"
-            f"  - 边数 (关系数): {num_graph_edges}\n"
-            f"---------------------------\n"
-        )
-        print(summary)
-        logging.info(summary.replace("\n", " | "))
-
+    # --- MemorySpace 相关接口迁移 ---
     def get_all_memory_space_names(self) -> List[str]:
         """
         获取所有MemorySpace名称（递归，去重）。
@@ -680,7 +557,6 @@ class SemanticGraph:
                 result.append(u)
         return result
 
-    # TODO: 可以理解为并集，那么MemorySpace是否需要其他操作，例如：交集、差集等？
     def deduplicate_units(self, units: List[MemoryUnit]) -> List[MemoryUnit]:
         seen = set()
         result = []
@@ -689,6 +565,467 @@ class SemanticGraph:
                 seen.add(u.uid)
                 result.append(u)
         return result
+
+    # --- 持久化 ---
+    def save_map(self, dir_path: str):
+        # 保存memory_spaces结构
+        with open(os.path.join(dir_path, "memory_spaces.pkl"), "wb") as f:
+            pickle.dump(self.memory_spaces, f)
+        with open(os.path.join(dir_path, "semantic_map.pkl"), "wb") as f:
+            pickle.dump(self, f)
+        logging.info(f"SemanticMap 已保存到 {dir_path}。")
+
+    @classmethod
+    def load_map(cls, file_path: str) -> "SemanticMap":
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"File {file_path} does not exist.")
+        with open(file_path, "rb") as f:
+            loaded_map = pickle.load(f)
+        # 加载memory_spaces
+        dir_path = os.path.dirname(file_path)
+        ms_file = os.path.join(dir_path, "memory_spaces.pkl")
+        if os.path.isfile(ms_file):
+            with open(ms_file, "rb") as fms:
+                loaded_map.memory_spaces = pickle.load(fms)
+        logging.info(f"SemanticMap 已从 {file_path} 加载。")
+        # 加载后自动重建索引（如果有unit）
+        if hasattr(loaded_map, "build_index"):
+            loaded_map.build_index()
+        return loaded_map
+
+
+class SemanticGraph:
+    """
+    语义图谱 (SemanticGraph) 结合了 SemanticMap 的向量存储/搜索能力和 NetworkX 的图结构管理能力。
+    它存储记忆单元作为节点，并允许在它们之间定义显式的命名关系。
+    查询可以利用显式图遍历和隐式语义相似性。
+    """
+
+    def __init__(
+        self,
+        semantic_map: Optional[SemanticMap] = None,
+        memory_spaces: Optional[List[MemorySpace]] = None,
+    ):
+        # memory_spaces参数兼容旧用法，优先传给semantic_map
+        if semantic_map is None:
+            self.semantic_map: SemanticMap = SemanticMap(memory_spaces=memory_spaces)
+        else:
+            self.semantic_map: SemanticMap = semantic_map
+            if memory_spaces:
+                self.semantic_map.memory_spaces = memory_spaces
+        self.nx_graph: nx.DiGraph = nx.DiGraph()
+        self.rel_types: Set[str] = set()
+        logging.info("SemanticGraph 已初始化。")
+
+    # --- MemorySpace相关接口直通 ---
+    def get_all_memory_space_names(self) -> List[str]:
+        return self.semantic_map.get_all_memory_space_names()
+
+    def get_memory_space_structures(self) -> List[dict]:
+        return self.semantic_map.get_memory_space_structures()
+
+    def get_units_in_memory_space(self, ms_names, recursive=True) -> List[MemoryUnit]:
+        return self.semantic_map.get_units_in_memory_space(
+            ms_names, recursive=recursive
+        )
+
+    def deduplicate_units(self, units: List[MemoryUnit]) -> List[MemoryUnit]:
+        return self.semantic_map.deduplicate_units(units)
+
+    # --- 辅助方法 ---
+    def _get_node_id(self, obj):
+        if isinstance(obj, MemoryUnit):
+            return obj.uid
+        elif isinstance(obj, MemorySpace):
+            return f"ms:{obj.name}"
+        elif isinstance(obj, str):
+            return obj
+        else:
+            raise ValueError("不支持的节点类型")
+
+    def _is_memory_space_id(self, node_id):
+        return isinstance(node_id, str) and node_id.startswith("ms:")
+
+    def _get_memory_space_by_id(self, ms_id):
+        # ms_id: ms:{name}
+        if not self._is_memory_space_id(ms_id):
+            return None
+        ms_name = ms_id[3:]
+
+        def _find(ms, name):
+            if ms.name == name:
+                return ms
+            for m in ms._members.values():
+                if isinstance(m, MemorySpace):
+                    res = _find(m, name)
+                    if res:
+                        return res
+            return None
+
+        for ms in self.semantic_map.memory_spaces:
+            res = _find(ms, ms_name)
+            if res:
+                return res
+        return None
+
+    # 允许直接操作memory_spaces（如增删空间），实际操作smap，并同步nx_graph
+    def add_memory_space(self, ms: MemorySpace):
+        self.semantic_map.memory_spaces.append(ms)
+        ms_id = self._get_node_id(ms)
+        if not self.nx_graph.has_node(ms_id):
+            self.nx_graph.add_node(ms_id, type="memory_space", name=ms.name)
+
+    def remove_memory_space(self, ms_name: str):
+        self.semantic_map.memory_spaces = [
+            ms for ms in self.semantic_map.memory_spaces if ms.name != ms_name
+        ]
+        ms_id = f"ms:{ms_name}"
+        if self.nx_graph.has_node(ms_id):
+            self.nx_graph.remove_node(ms_id)
+
+    def add_unit(
+        self, unit: MemoryUnit, rebuild_semantic_map_index_immediately: bool = False
+    ):
+        """
+        向图谱添加一个记忆单元 (节点)，并注册到 SemanticMap。
+        """
+        self.semantic_map.register_unit(unit)
+        if rebuild_semantic_map_index_immediately:
+            self.semantic_map.build_index()
+        node_id = self._get_node_id(unit)
+        if self.nx_graph.has_node(node_id):
+            logging.warning(
+                f"MemoryUnit {unit.uid} already exists in the graph, skip add."
+            )
+            return
+        self.nx_graph.add_node(
+            node_id, raw_data=unit.raw_data, metadata=unit.metadata, type="memory_unit"
+        )
+        logging.debug(f"节点 '{node_id}' 已添加到 NetworkX 图。")
+
+    def remove_unit(self, uid: str, rebuild_index_immediately: bool = False):
+        node_id = self._get_node_id(uid)
+        if self.nx_graph.has_node(node_id):
+            self.nx_graph.remove_node(node_id)
+            logging.debug(f"MemoryUnit {uid} has been removed from NetworkX graph.")
+        else:
+            logging.warning(f"MemoryUnit {uid} does not exist in NetworkX graph.")
+        self.semantic_map.unregister_unit(uid)
+        if rebuild_index_immediately:
+            self.semantic_map.build_index()
+
+    def update_unit(self, unit: MemoryUnit):
+        node_id = self._get_node_id(unit)
+        if self.nx_graph.has_node(node_id):
+            # 可根据需要更新节点属性
+            self.nx_graph.nodes[node_id]["raw_data"] = unit.raw_data
+            self.nx_graph.nodes[node_id]["metadata"] = unit.metadata
+            logging.debug(f"MemoryUnit {unit.uid} 节点属性已更新。")
+        else:
+            logging.warning(f"MemoryUnit {unit.uid} does not exist in NetworkX graph.")
+        self.semantic_map.register_unit(unit)  # 重新注册会覆盖
+
+    def get_unit(self, uid: str) -> Optional[MemoryUnit]:
+        node_id = self._get_node_id(uid)
+        if self.nx_graph.has_node(node_id):
+            return self.semantic_map.get_unit(uid)
+        return None
+
+    def add_explicit_edge(
+        self,
+        src_uid,
+        tgt_uid,
+        rel_type: str,
+        bidirectional: bool = False,
+        metadata: Optional[Dict] = None,
+    ):
+        src_id = self._get_node_id(src_uid)
+        tgt_id = self._get_node_id(tgt_uid)
+        # 节点存在性检查：MemoryUnit 或 MemorySpace
+        src_is_unit = self.semantic_map.get_unit(src_id) is not None
+        tgt_is_unit = self.semantic_map.get_unit(tgt_id) is not None
+        src_is_space = (
+            self._is_memory_space_id(src_id)
+            and self._get_memory_space_by_id(src_id) is not None
+        )
+        tgt_is_space = (
+            self._is_memory_space_id(tgt_id)
+            and self._get_memory_space_by_id(tgt_id) is not None
+        )
+        if not (src_is_unit or src_is_space):
+            raise ValueError(f"Source node {src_id} does not exist.")
+        if not (tgt_is_unit or tgt_is_space):
+            raise ValueError(f"Target node {tgt_id} does not exist.")
+        if not self.nx_graph.has_node(src_id):
+            if src_is_unit:
+                unit = self.semantic_map.get_unit(src_id)
+                if unit is not None:
+                    self.nx_graph.add_node(
+                        src_id,
+                        raw_data=unit.raw_data,
+                        metadata=unit.metadata,
+                        type="memory_unit",
+                    )
+                else:
+                    self.nx_graph.add_node(src_id, type="memory_unit")
+            elif src_is_space:
+                ms = self._get_memory_space_by_id(src_id)
+                if ms is not None:
+                    self.nx_graph.add_node(src_id, type="memory_space", name=ms.name)
+                else:
+                    self.nx_graph.add_node(src_id, type="memory_space")
+        if not self.nx_graph.has_node(tgt_id):
+            if tgt_is_unit:
+                unit = self.semantic_map.get_unit(tgt_id)
+                if unit is not None:
+                    self.nx_graph.add_node(
+                        tgt_id,
+                        raw_data=unit.raw_data,
+                        metadata=unit.metadata,
+                        type="memory_unit",
+                    )
+                else:
+                    self.nx_graph.add_node(tgt_id, type="memory_unit")
+            elif tgt_is_space:
+                ms = self._get_memory_space_by_id(tgt_id)
+                if ms is not None:
+                    self.nx_graph.add_node(tgt_id, type="memory_space", name=ms.name)
+                else:
+                    self.nx_graph.add_node(tgt_id, type="memory_space")
+        if not metadata:
+            metadata = {}
+        metadata["created"] = datetime.now()
+        edge_attributes = {"type": rel_type, **metadata}
+        self.nx_graph.add_edge(src_id, tgt_id, **edge_attributes)
+        logging.info(f"已添加从 '{src_id}' 到 '{tgt_id}' 的关系 '{rel_type}'。")
+        if bidirectional:
+            self.nx_graph.add_edge(tgt_id, src_id, **edge_attributes)
+            logging.info(f"已添加从 '{tgt_id}' 到 '{src_id}' 的双向关系 '{rel_type}'。")
+        self.rel_types.add(rel_type)
+
+    def delete_explicit_edge(
+        self,
+        source_unit_id: str,
+        target_unit_id: str,
+        relationship_name: Optional[str] = None,
+    ):
+        if not self.nx_graph.has_edge(source_unit_id, target_unit_id):
+            logging.warning(
+                f"节点 '{source_unit_id}' 和 '{target_unit_id}' 之间没有直接边。"
+            )
+            return
+        if relationship_name:
+            edge_data = self.nx_graph.get_edge_data(source_unit_id, target_unit_id)
+            if edge_data and edge_data.get("type") == relationship_name:
+                self.nx_graph.remove_edge(source_unit_id, target_unit_id)
+                logging.info(
+                    f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的关系 '{relationship_name}'。"
+                )
+            else:
+                logging.warning(
+                    f"未找到从 '{source_unit_id}' 到 '{target_unit_id}' 的名为 '{relationship_name}' 的关系。"
+                )
+        else:
+            self.nx_graph.remove_edge(source_unit_id, target_unit_id)
+            logging.info(
+                f"已删除从 '{source_unit_id}' 到 '{target_unit_id}' 的所有直接关系。"
+            )
+
+    def get_all_units(self) -> List[MemoryUnit]:
+        return self.semantic_map.get_all_units()
+
+    def build_index(self, min_unit_threshold: int = 100):
+        """
+        重建语义图谱的全局向量索引（调用SemanticMap的build_index）。
+        """
+        self.semantic_map.build_index(min_unit_threshold=min_unit_threshold)
+        logging.info("SemanticGraph: 全局及所有MemorySpace索引已重建（含阈值过滤）。")
+
+    def get_all_relations(self) -> list:
+        """
+        返回所有已注册的显式关系类型列表。
+        """
+        return list(self.rel_types)
+
+    # --- 持久化 ---
+    def save_graph(self, directory_path: str):
+        """
+        将 SemanticGraph 的状态保存到指定目录。
+        包括 SemanticMap 的数据、NetworkX 图结构、关系类型、memory_spaces结构。
+        """
+        os.makedirs(directory_path, exist_ok=True)
+        self.semantic_map.save_map(directory_path)
+        with open(os.path.join(directory_path, "semantic_graph.pkl"), "wb") as f:
+            pickle.dump(self.nx_graph, f)
+        with open(os.path.join(directory_path, "rel_types.pkl"), "wb") as f:
+            pickle.dump(self.rel_types, f)
+        logging.info(f"SemanticGraph 已保存到 {directory_path}")
+
+    @classmethod
+    def load_graph(cls, directory_path: str):
+        """
+        从指定目录加载 SemanticGraph 的状态。
+        包括 SemanticMap 的数据、NetworkX 图结构、关系类型、memory_spaces结构。
+        返回: SemanticGraph实例
+        """
+        if not os.path.isdir(directory_path):
+            raise ValueError(f"Directory {directory_path} does not exist.")
+
+        semantic_map = SemanticMap.load_map(
+            os.path.join(directory_path, "semantic_map.pkl")
+        )
+
+        graph_file = os.path.join(directory_path, "semantic_graph.pkl")
+        if not os.path.isfile(graph_file):
+            raise ValueError(f"Graph file {graph_file} does not exist.")
+        with open(graph_file, "rb") as f:
+            nx_graph = pickle.load(f)
+
+        rel_types_file = os.path.join(directory_path, "rel_types.pkl")
+        if not os.path.isfile(rel_types_file):
+            raise ValueError(f"Rel types file {rel_types_file} does not exist.")
+        with open(rel_types_file, "rb") as f:
+            rel_types = pickle.load(f)
+
+        # 加载memory_spaces结构
+        memory_spaces_file = os.path.join(directory_path, "memory_spaces.pkl")
+        if not os.path.isfile(memory_spaces_file):
+            raise ValueError(f"MemorySpaces file {memory_spaces_file} does not exist.")
+        with open(memory_spaces_file, "rb") as f:
+            memory_spaces = pickle.load(f)
+
+        # 递归注册所有memory_spaces下的unit到semantic_map
+        for ms in memory_spaces:
+            semantic_map.register_units_from_space(ms, update_embedding=False)
+
+        # 确保所有unit都在nx_graph节点中
+        for unit in semantic_map.get_all_units():
+            if not nx_graph.has_node(unit.uid):
+                nx_graph.add_node(
+                    unit.uid, raw_data=unit.raw_data, metadata=unit.metadata
+                )
+
+        graph_instance = cls(semantic_map, memory_spaces)
+        graph_instance.nx_graph = nx_graph
+        graph_instance.rel_types = rel_types
+        logging.info(
+            f"SemanticGraph 已从 '{directory_path}' 加载，并已注册所有unit与重建索引。"
+        )
+        return graph_instance
+
+    def display_graph_summary(self):
+        """打印图谱的摘要信息。"""
+        num_map_units = len(self.semantic_map.get_all_units())
+        num_map_indexed = 0
+        emb_index = getattr(self.semantic_map, "_emb_index", None)
+        if emb_index is not None and hasattr(emb_index, "ntotal"):
+            num_map_indexed = emb_index.ntotal
+        # 记忆空间数无法直接统计，略去
+        num_graph_nodes = self.nx_graph.number_of_nodes()
+        num_graph_edges = self.nx_graph.number_of_edges()
+
+        summary = (
+            f"--- SemanticGraph 摘要 ---\n"
+            f"SemanticMap:\n"
+            f"  - 记忆单元总数: {num_map_units}\n"
+            f"  - 已索引向量数: {num_map_indexed}\n"
+            f"NetworkX Graph:\n"
+            f"  - 节点数: {num_graph_nodes}\n"
+            f"  - 边数 (关系数): {num_graph_edges}\n"
+            f"---------------------------\n"
+        )
+        print(summary)
+        logging.info(summary.replace("\n", " | "))
+
+    def get_explicit_neighbors(
+        self, uids, rel_type=None, ms_names=None, direction="successors", recursive=True
+    ):
+        result = []
+        for uid in uids:
+            if direction == "successors":
+                neighbors = self.nx_graph.successors(uid)
+            elif direction == "predecessors":
+                neighbors = self.nx_graph.predecessors(uid)
+            else:
+                neighbors = set(self.nx_graph.successors(uid)) | set(
+                    self.nx_graph.predecessors(uid)
+                )
+            for n in neighbors:
+                if rel_type:
+                    edge = (
+                        self.nx_graph.get_edge_data(uid, n)
+                        if direction != "predecessors"
+                        else self.nx_graph.get_edge_data(n, uid)
+                    )
+                    if not edge or edge.get("type") != rel_type:
+                        continue
+                unit = self.semantic_map.get_unit(n)
+                if unit is not None:
+                    result.append(unit)
+        if ms_names:
+            ms_units = set(
+                u.uid
+                for u in self.get_units_in_memory_space(ms_names, recursive=recursive)
+            )
+            result = [u for u in result if u.uid in ms_units]
+        return result
+
+    def get_implicit_neighbors(self, uid, top_k=5, ms_names=None, recursive=True):
+        unit = self.semantic_map.get_unit(uid)
+        if not unit or unit.embedding is None:
+            return []
+        # 优化：ms_names为None或单空间时用索引
+        if ms_names is None:
+            # 全局索引
+            try:
+                return [
+                    u
+                    for u, _ in self.semantic_map.search_similarity_units_by_vector(
+                        unit.embedding, top_k
+                    )
+                ]
+            except Exception:
+                pass  # 回退暴力查找
+        elif isinstance(ms_names, (list, tuple)) and len(ms_names) == 1:
+            ms = None
+            for m in self.semantic_map.memory_spaces:
+                if m.name == ms_names[0]:
+                    ms = m
+                    break
+            if ms:
+                try:
+                    return [
+                        u
+                        for u, _ in ms.search_similarity_units_by_vector(
+                            unit.embedding, top_k
+                        )
+                    ]
+                except Exception:
+                    pass  # 回退暴力查找
+        # 多空间或找不到索引时，暴力查找
+        if ms_names:
+            units = self.get_units_in_memory_space(ms_names, recursive=recursive)
+        else:
+            units = self.semantic_map.get_all_units()
+        arr = np.array(
+            [u.embedding for u in units if u.embedding is not None], dtype=np.float32
+        )
+        if arr.shape[0] == 0:
+            return []
+        from faiss import IndexFlatL2
+
+        index = IndexFlatL2(arr.shape[1])
+        index.add(arr)
+        D, I = index.search(
+            unit.embedding.reshape(1, -1).astype(np.float32), min(top_k, arr.shape[0])
+        )
+        results = []
+        for i in range(len(I[0])):
+            idx = int(I[0][i])
+            if I[0][i] == -1:
+                continue
+            results.append(units[idx])
+        return results
 
     # 现有API递归参数适配示例
     def filter_memory_units(
@@ -738,6 +1075,29 @@ class SemanticGraph:
     def search_similarity_in_graph(
         self, query_text, top_k=5, ms_names=None, recursive=True
     ):
+        # 优化：ms_names为None或单空间时用索引
+        if ms_names is None:
+            # 全局索引
+            try:
+                return self.semantic_map.search_similarity_units_by_text(
+                    query_text, top_k
+                )
+            except Exception:
+                pass  # 回退暴力查找
+        elif isinstance(ms_names, (list, tuple)) and len(ms_names) == 1:
+            ms = None
+            for m in self.semantic_map.memory_spaces:
+                if m.name == ms_names[0]:
+                    ms = m
+                    break
+            if ms:
+                try:
+                    return ms.search_similarity_units_by_vector(
+                        self.semantic_map._get_text_embedding(query_text), top_k
+                    )
+                except Exception:
+                    pass  # 回退暴力查找
+        # 多空间或找不到索引时，暴力查找
         if ms_names:
             units = self.get_units_in_memory_space(ms_names, recursive=recursive)
         else:
@@ -764,238 +1124,3 @@ class SemanticGraph:
                 continue
             results.append((units[idx], D[0][i]))
         return results
-
-    def get_explicit_neighbors(
-        self, uids, rel_type=None, ms_names=None, direction="successors", recursive=True
-    ):
-        result = []
-        for uid in uids:
-            if direction == "successors":
-                neighbors = self.nx_graph.successors(uid)
-            elif direction == "predecessors":
-                neighbors = self.nx_graph.predecessors(uid)
-            else:
-                neighbors = set(self.nx_graph.successors(uid)) | set(
-                    self.nx_graph.predecessors(uid)
-                )
-            for n in neighbors:
-                if rel_type:
-                    edge = (
-                        self.nx_graph.get_edge_data(uid, n)
-                        if direction != "predecessors"
-                        else self.nx_graph.get_edge_data(n, uid)
-                    )
-                    if not edge or edge.get("type") != rel_type:
-                        continue
-                unit = self.semantic_map.get_unit(n)
-                if unit is not None:
-                    result.append(unit)
-        if ms_names:
-            ms_units = set(
-                u.uid
-                for u in self.get_units_in_memory_space(ms_names, recursive=recursive)
-            )
-            result = [u for u in result if u.uid in ms_units]
-        return result
-
-    def get_implicit_neighbors(self, uid, top_k=5, ms_names=None, recursive=True):
-        unit = self.semantic_map.get_unit(uid)
-        if not unit or unit.embedding is None:
-            return []
-        if ms_names:
-            units = self.get_units_in_memory_space(ms_names, recursive=recursive)
-        else:
-            units = self.semantic_map.get_all_units()
-        arr = np.array(
-            [u.embedding for u in units if u.embedding is not None], dtype=np.float32
-        )
-        if arr.shape[0] == 0:
-            return []
-        from faiss import IndexFlatL2
-
-        index = IndexFlatL2(arr.shape[1])
-        index.add(arr)
-        D, I = index.search(
-            unit.embedding.reshape(1, -1).astype(np.float32), min(top_k, arr.shape[0])
-        )
-        results = []
-        for i in range(len(I[0])):
-            idx = int(I[0][i])
-            if I[0][i] == -1:
-                continue
-            results.append(units[idx])
-        return results
-
-    # ...existing code...
-
-
-if __name__ == "__main__":
-    logging.info("开始 Hippo.py 示例用法（MemorySpace 独立与嵌套演示）...")
-
-    # 1. 构建嵌套 MemorySpace 结构
-    ms_root = MemorySpace("知识库")
-    ms_ai = MemorySpace("AI文档")
-    ms_nlp = MemorySpace("NLP相关")
-    ms_concept = MemorySpace("AI概念")
-    ms_paper = MemorySpace("论文集")
-    ms_root.add(ms_ai)
-    ms_root.add(ms_nlp)
-    ms_ai.add(ms_concept)
-    ms_ai.add(ms_paper)
-
-    # 2. 创建更多 MemoryUnit 并主动添加到不同 MemorySpace
-    unit1 = MemoryUnit(
-        uid="doc_ai_intro",
-        raw_data={
-            "description": "AI介绍",
-            "type": "文档",
-            "text_content": "这是一个关于人工智能的文档。",
-            "author": "系统",
-        },
-    )
-    unit2 = MemoryUnit(
-        uid="concept_ml",
-        raw_data={
-            "description": "ML定义",
-            "type": "概念",
-            "text_content": "机器学习是人工智能的一个分支。",
-            "field": "AI",
-        },
-    )
-    unit3 = MemoryUnit(
-        uid="obs_dl_nlp",
-        raw_data={
-            "description": "DL对NLP的影响",
-            "type": "观察",
-            "text_content": "深度学习推动了自然语言处理的进步。",
-        },
-    )
-    unit4 = MemoryUnit(
-        uid="doc_nlp_intro",
-        raw_data={
-            "description": "NLP介绍",
-            "type": "文档",
-            "text_content": "自然语言处理是AI的重要领域。",
-        },
-    )
-    unit5 = MemoryUnit(
-        uid="concept_dl",
-        raw_data={
-            "description": "DL定义",
-            "type": "概念",
-            "text_content": "深度学习是机器学习的一个分支。",
-        },
-    )
-    unit6 = MemoryUnit(
-        uid="paper_transformer",
-        raw_data={
-            "description": "Transformer论文",
-            "type": "论文",
-            "text_content": "Attention is All You Need.",
-        },
-    )
-    unit7 = MemoryUnit(
-        uid="paper_bert",
-        raw_data={
-            "description": "BERT论文",
-            "type": "论文",
-            "text_content": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding.",
-        },
-    )
-    unit8 = MemoryUnit(
-        uid="obs_ai_trend",
-        raw_data={
-            "description": "AI发展趋势",
-            "type": "观察",
-            "text_content": "AI正在快速发展，应用领域不断扩展。",
-        },
-    )
-
-    ms_ai.add(unit1)
-    ms_concept.add(unit2)
-    ms_nlp.add(unit3)
-    ms_nlp.add(unit4)
-    ms_concept.add(unit5)
-    ms_paper.add(unit6)
-    ms_paper.add(unit7)
-    ms_root.add(unit8)
-
-    # 3. 递归收集所有unit
-    all_units = ms_root.get_all_units()
-    logging.info(f"ms_root递归收集到的所有unit: {[u.uid for u in all_units]}")
-
-    # 输出各个记忆空间包含的unit（含有关系）
-    def print_space_units(space: MemorySpace, indent: int = 0):
-        prefix = "  " * indent
-        units = [k for k, v in space._members.items() if isinstance(v, MemoryUnit)]
-        spaces = [v for v in space._members.values() if isinstance(v, MemorySpace)]
-        logging.info(f"{prefix}MemorySpace '{space.name}' 包含 MemoryUnit: {units}")
-        for subspace in spaces:
-            print_space_units(subspace, indent + 1)
-
-    print_space_units(ms_root)
-
-    # 4. 构建局部索引并做局部相似性检索
-    # 先为所有unit生成embedding（用SemanticMap的接口）
-    smap = SemanticMap(
-        image_embedding_model_name="/mnt/data1/home/guozy/gzy/models/clip-ViT-B-32",
-        text_embedding_model_name="/mnt/data1/home/guozy/gzy/models/clip-ViT-B-32-multilingual-v1",
-    )
-
-    for u in all_units:
-        smap.register_unit(u)  # 生成embedding
-    # 再构建ms_root的局部索引
-    ms_root.build_index()
-    # 用文本做一次局部相似性检索
-    query = "人工智能的分支有哪些？"
-    query_vec = smap._get_text_embedding(query)
-    local_results = ms_root.search_similarity_units_by_vector(query_vec, top_k=3)
-    logging.info("ms_root 局部相似性检索结果：")
-    for unit, score in local_results:
-        logging.info(
-            f"unit: {unit.uid}, desc: {unit.raw_data.get('description')}, 距离: {score:.4f}"
-        )
-
-    # 5. 用户可自由组合/嵌套ms，灵活组织知识
-    ms_sub = MemorySpace("AI子空间")
-    ms_sub.add(unit1)
-    ms_sub.add(unit5)
-    ms_root.add(ms_sub)
-    logging.info(f"ms_root成员: {ms_root.list_members()}")
-    logging.info(f"ms_sub成员: {ms_sub.list_members()}")
-
-    # 6. 展示 MemoryUnit、MemorySpace、SemanticMap、SemanticGraph 之间的关系
-    logging.info("------ 结构关系展示 ------")
-    logging.info(
-        f"MemorySpace（知识库）包含的所有子空间: {[s.name for s in ms_root.get_all_spaces()]}"
-    )
-    logging.info(
-        f"MemorySpace（知识库）递归包含的所有unit: {[u.uid for u in ms_root.get_all_units()]}"
-    )
-    logging.info(f"SemanticMap 全局unit数: {len(smap.get_all_units())}")
-
-    # 构建语义图谱，将所有unit注册为节点，并添加部分关系
-    sgraph = SemanticGraph(smap)
-    for u in all_units:
-        try:
-            sgraph.add_unit(u)
-        except ValueError:
-            pass  # 已存在则跳过
-    # 添加显式关系
-    sgraph.add_explicit_edge("concept_ml", "concept_dl", "子概念")
-    sgraph.add_explicit_edge("doc_ai_intro", "concept_ml", "介绍")
-    sgraph.add_explicit_edge("paper_transformer", "paper_bert", "引用")
-    sgraph.add_explicit_edge("obs_dl_nlp", "doc_nlp_intro", "相关")
-    logging.info(
-        f"SemanticGraph 节点数: {sgraph.nx_graph.number_of_nodes()}，边数: {sgraph.nx_graph.number_of_edges()}"
-    )
-
-    logging.info("------ 结构说明 ------")
-    logging.info("MemoryUnit：最小知识单元，存储具体内容。")
-    logging.info("MemorySpace：可嵌套的知识空间，用户主动组织和收集unit。")
-    logging.info("SemanticMap：全局唯一unit集合，支持embedding和向量检索。")
-    logging.info(
-        "SemanticGraph：在SemanticMap基础上，支持unit间的显式关系和图结构分析。"
-    )
-
-    logging.info("\nHippo.py 示例用法结束。")
