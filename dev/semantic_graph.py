@@ -285,23 +285,90 @@ class SemanticGraph:
         
         logging.warning(f"节点 '{uid}' 在内存和外部存储中均不存在")
         return None
-    
-    ### LLM缓存顾问相关功能 ###
 
-    def set_llm_cache_advisor(self, llm_client, model_name: str = "gpt-4"):
-        """为语义图设置LLM缓存顾问"""
-        self.semantic_map.set_llm_cache_advisor(llm_client, model_name)
-        logging.info("SemanticGraph LLM缓存顾问已启用")
+    # ==============================
+    # 新增方法：兼容新的 MemorySpace 架构
+    # ==============================
 
-    ### 内存管理和换页策略 ###
+    def create_memory_space_in_map(self, space_name: str) -> MemorySpace:
+        """在底层的 SemanticMap 中创建或获取一个内存空间。"""
+        return self.semantic_map.create_memory_space(space_name)
+
+    def add_unit_to_space_in_map(self, unit_or_uid, space_name: str):
+        """将一个内存单元添加到 SemanticMap 中的指定内存空间。"""
+        self.semantic_map.add_unit_to_space(unit_or_uid, space_name)
+
+    def remove_unit_from_space_in_map(self, unit_or_uid, space_name: str):
+        """从 SemanticMap 中的指定内存空间移除一个内存单元。"""
+        self.semantic_map.remove_unit_from_space(unit_or_uid, space_name)
+
+    def get_units_in_memory_space(self, ms_names, recursive: bool = True) -> List[MemoryUnit]:
+        """获取指定内存空间中的所有单元"""
+        return self.semantic_map.get_units_in_memory_space(ms_names, recursive)
+
+    def search_similarity_in_graph(self,
+                                   query_text: Optional[str] = None,
+                                   query_embedding: Optional[np.ndarray] = None,
+                                   query_image_path: Optional[str] = None,
+                                   k: int = 5,
+                                   space_name: Optional[str] = None,
+                                   ms_names: Optional[List[str]] = None,
+                                   recursive: bool = True,
+                                   filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
+        """
+        在图谱中执行语义相似性搜索，兼容新的 MemorySpace 架构
+        """
+        # 如果指定了 ms_names，使用新的搜索方法
+        if ms_names:
+            if query_text:
+                return self.semantic_map.search_similarity_in_graph(
+                    query_text, k, ms_names, recursive
+                )
+            else:
+                # 对于非文本查询，先在指定空间获取单元，然后进行搜索
+                units = self.get_units_in_memory_space(ms_names, recursive)
+                if not units:
+                    return []
+                
+                # 构建过滤ID集合
+                space_filter_uids = {unit.uid for unit in units}
+                if filter_uids:
+                    space_filter_uids.intersection_update(filter_uids)
+                
+                # 执行搜索
+                if query_embedding is not None:
+                    return self.semantic_map.search_similarity_by_embedding(
+                        query_embedding, k, space_name, space_filter_uids
+                    )
+                elif query_image_path is not None:
+                    return self.semantic_map.search_similarity_by_image(
+                        query_image_path, k, space_name, space_filter_uids
+                    )
+        else:
+            # 使用原有的搜索方法
+            if query_embedding is not None:
+                return self.semantic_map.search_similarity_by_embedding(
+                    query_embedding, k, space_name, filter_uids
+                )
+            elif query_text is not None:
+                return self.semantic_map.search_similarity_by_text(
+                    query_text, k, space_name, filter_uids
+                )
+            elif query_image_path is not None:
+                return self.semantic_map.search_similarity_by_image(
+                    query_image_path, k, space_name, filter_uids
+                )
+        
+        logging.warning("必须提供 query_text, query_embedding 或 query_image_path 之一进行相似性搜索。")
+        return []
+
+    # ==============================
+    # 内存管理和换页策略（保持原有功能）
+    # ==============================
 
     def swap_out_nodes(self, count: int = 100, strategy: str = "LRU", query_context: Optional[str] = None) -> int:
         """
         将不常用节点从内存移出到外部存储
-        参数:
-            count: 要移出的节点数量
-            strategy: 换出策略，支持 "LLM"、"LRU"、"LFU"
-            query_context: 当前查询上下文（用于LLM策略）
         """
         if not self.semantic_map._external_storage:
             logging.warning("未连接外部存储，无法执行节点换出")
@@ -312,91 +379,20 @@ class SemanticGraph:
             logging.debug("内存中没有节点可以换出")
             return 0
         
-        # 使用策略参数调用 SemanticMap 的 swap_out 方法
-        if strategy == "LLM" and hasattr(self.semantic_map, '_llm_cache_advisor') and self.semantic_map._llm_cache_advisor:
-            try:
-                # 使用LLM策略，直接调用 semantic_map 的 swap_out 方法
-                before_count = len(self.semantic_map.memory_units)
-                self.semantic_map.swap_out(count=count, strategy="LLM", query_context=query_context)
-                after_count = len(self.semantic_map.memory_units)
-                removed_count = before_count - after_count
-                
-                # 清理 SemanticGraph 中相关的访问统计
-                for uid in list(self._nodes_access_counts.keys()):
-                    if uid not in self.semantic_map.memory_units:
-                        self._nodes_access_counts.pop(uid, None)
-                        self._nodes_last_accessed.pop(uid, None)
-                        self._nodes_dirty_flag.discard(uid)
-                
-                logging.info(f"使用LLM策略已将 {removed_count} 个节点从内存移出")
-                return removed_count
-                
-            except Exception as e:
-                logging.error(f"LLM缓存决策失败: {e}，降级使用LRU算法")
-                strategy = "LRU"  # 降级到LRU
+        # 使用 SemanticMap 的 swap_out 方法
+        before_count = len(self.semantic_map.memory_units)
+        self.semantic_map.swap_out(count=count, strategy=strategy, query_context=query_context)
+        after_count = len(self.semantic_map.memory_units)
+        removed_count = before_count - after_count
         
-        # 使用传统策略 (LRU/LFU) 或LLM策略失败后的降级
-        candidates = list(self.semantic_map.memory_units.keys())
-        if strategy == "LRU":
-            # 按最后访问时间排序，最少最近使用的优先换出
-            candidates.sort(key=lambda uid: self._nodes_last_accessed.get(uid, 0))
-        elif strategy == "LFU":
-            # 按访问频率排序，访问次数最少的优先换出
-            candidates.sort(key=lambda uid: self._nodes_access_counts.get(uid, 0))
-        else:
-            logging.warning(f"不支持的换出策略: {strategy}，使用LRU")
-            candidates.sort(key=lambda uid: self._nodes_last_accessed.get(uid, 0))
-        
-        # 限制换出数量
-        actual_count = min(count, len(candidates))
-        if actual_count == 0:
-            return 0
-            
-        nodes_to_page_out = candidates[:actual_count]
-        
-        # 同步已修改的节点到外部存储
-        synced_count = 0
-        for uid in nodes_to_page_out:
-            if uid in self._nodes_dirty_flag:
-                unit = self.semantic_map.memory_units.get(uid)
-                if unit:
-                    # 获取节点所属空间
-                    space_names = []
-                    for space_name, space in self.semantic_map.memory_spaces.items():
-                        if uid in space.get_memory_uids():
-                            space_names.append(space_name)
-                    
-                    # 同步到外部存储
-                    success = self.semantic_map._external_storage.add_unit(unit, space_names)
-                    if success:
-                        self._nodes_dirty_flag.discard(uid)  # 使用discard避免KeyError
-                        synced_count += 1
-                        logging.debug(f"节点 '{uid}' 已同步到外部存储")
-        
-        # 从内存中移除这些节点(但保留在图结构中)
-        removed_count = 0
-        for uid in nodes_to_page_out:
-            if uid in self.semantic_map.memory_units:
-                del self.semantic_map.memory_units[uid]
-                removed_count += 1
-                
-                # 从FAISS索引中移除
-                if uid in self.semantic_map._uid_to_internal_faiss_id and self.semantic_map.faiss_index:
-                    try:
-                        internal_id = self.semantic_map._uid_to_internal_faiss_id[uid]
-                        if hasattr(self.semantic_map.faiss_index, 'remove_ids'):
-                            self.semantic_map.faiss_index.remove_ids(np.array([internal_id], dtype=np.int64))
-                        del self.semantic_map._uid_to_internal_faiss_id[uid]
-                        logging.debug(f"节点 '{uid}' 已从FAISS索引中移除")
-                    except Exception as e:
-                        logging.error(f"从FAISS索引移除节点 '{uid}' 失败: {e}")
-                
-                # 清理访问统计
+        # 清理 SemanticGraph 中相关的访问统计
+        for uid in list(self._nodes_access_counts.keys()):
+            if uid not in self.semantic_map.memory_units:
                 self._nodes_access_counts.pop(uid, None)
                 self._nodes_last_accessed.pop(uid, None)
-                logging.debug(f"节点 '{uid}' 已从内存中移出")
+                self._nodes_dirty_flag.discard(uid)
         
-        logging.info(f"使用{strategy}策略已将 {removed_count} 个节点从内存移出，其中 {synced_count} 个节点已同步到外部存储")
+        logging.info(f"已将 {removed_count} 个节点从内存移出")
         return removed_count
 
     def swap_in_nodes(self, node_ids: List[str]) -> int:
@@ -456,9 +452,6 @@ class SemanticGraph:
     def swap_out_relationship(self, count: int = 100, strategy: str = "LRU"):
         """
         将关系从内存换出到Neo4j数据库
-        参数:
-            count: 要换出的关系数量
-            strategy: 换出策略，支持 "LRU"、"LFU"
         """
         if not self._relationship_cache:
             logging.debug("关系缓存为空，无需换出")
@@ -472,13 +465,11 @@ class SemanticGraph:
         
         # 根据策略确定要换出的关系
         if strategy == "LRU":
-            # 按最后访问时间排序，最少最近使用的优先换出
             sorted_rels = sorted(
                 self._relationship_cache.keys(),
                 key=lambda k: self._relationships_last_accessed.get(k, 0)
             )
         elif strategy == "LFU":
-            # 按访问频率排序，访问次数最少的优先换出
             sorted_rels = sorted(
                 self._relationship_cache.keys(),
                 key=lambda k: self._relationships_access_counts.get(k, 0)
@@ -521,15 +512,6 @@ class SemanticGraph:
                 if rel_key in self._relationships_last_accessed:
                     del self._relationships_last_accessed[rel_key]
                 
-                # 同时从NetworkX图中移除（如果需要的话，保持内存图的一致性）
-                # 注意：这里可以选择保留在NetworkX中，只是清理详细属性缓存
-                # 或者完全移除，这取决于设计需求
-                if self.nx_graph.has_edge(source_uid, target_uid):
-                    edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
-                    if edge_data and edge_data.get("type") == rel_type:
-                        # 可以选择移除边或只清理一些属性
-                        pass
-                
                 logging.debug(f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 已从内存缓存中移除")
                 
             except Exception as e:
@@ -563,79 +545,9 @@ class SemanticGraph:
         
         logging.debug(f"已清理 {removed_count} 个关系缓存（备用模式）")
 
-
-    def search_with_llm_cache(self, 
-                            query_text: str,
-                            k: int = 5,
-                            space_name: Optional[str] = None) -> List[Tuple[MemoryUnit, float]]:
-        """
-        带LLM缓存优化的搜索
-        """
-        # 执行搜索
-        results = self.semantic_map.search_similarity_by_text(query_text, k, space_name)
-        
-        # 记录查询和访问的单元
-        accessed_uids = [unit.uid for unit, _ in results]
-        self.semantic_map.record_query(query_text, accessed_uids)
-        
-        # 可选：基于查询预取相关单元
-        if hasattr(self.semantic_map, '_llm_cache_advisor') and self.semantic_map._llm_cache_advisor:
-            try:
-                # 获取可能需要预取的单元ID（从外部存储）
-                if self.semantic_map._external_storage:
-                    # 这里需要实现获取外部存储中所有单元ID的方法
-                    # available_units = self.semantic_map._external_storage.get_all_unit_ids()
-                    # prefetch_uids = self.semantic_map._llm_cache_advisor.recommend_prefetch(
-                    #     query_text, available_units, prefetch_count=3
-                    # )
-                    # self.cache_nodes(prefetch_uids)
-                    pass
-            except Exception as e:
-                logging.error(f"LLM预取推荐失败: {e}")
-        
-        return results
-    
-    ### 数据库操作
-    def get_relationship(self, source_uid: str, target_uid: str, relationship_name: Optional[str] = None) -> Dict:
-        """获取关系属性，必要时从Neo4j加载"""
-        # 先检查内存中是否有此关系
-        if relationship_name:
-            rel_key = (source_uid, target_uid, relationship_name)
-            if rel_key in self._relationship_cache:
-                # 更新访问统计
-                self._relationships_access_counts[rel_key] = self._relationships_access_counts.get(rel_key, 0) + 1
-                self._relationships_last_accessed[rel_key] = datetime.now().timestamp()
-                return self._relationship_cache[rel_key]
-            
-            # 从NetworkX获取
-            if self.nx_graph.has_edge(source_uid, target_uid):
-                edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
-                if edge_data and edge_data.get("type") == relationship_name:
-                    # 缓存并返回
-                    properties = {k: v for k, v in edge_data.items() if k not in ["type", "created", "updated"]}
-                    self.swap_in_relationship(source_uid, target_uid, relationship_name, properties)
-                    return properties
-        else:
-            # 获取所有类型的关系
-            if self.nx_graph.has_edge(source_uid, target_uid):
-                return self.nx_graph.get_edge_data(source_uid, target_uid)
-        
-        # 内存中没有，尝试从Neo4j加载
-        if self._neo4j_connection:
-            try:
-                properties = self._neo4j_connection.get_relationship_properties(
-                    source_uid, target_uid, relationship_name
-                )
-                if properties:
-                    # 添加到NetworkX和缓存
-                    if relationship_name:
-                        self.nx_graph.add_edge(source_uid, target_uid, type=relationship_name, **properties)
-                        self.swap_in_relationship(source_uid, target_uid, relationship_name, properties)
-                    return properties
-            except Exception as e:
-                logging.error(f"从Neo4j加载关系失败: {e}")
-        
-        return {}
+    # ==============================
+    # 数据库同步方法（更新兼容性）
+    # ==============================
 
     def sync_to_external(self, 
                     force_full_sync: bool = False,
@@ -644,45 +556,20 @@ class SemanticGraph:
                     sync_relationships: bool = True) -> Dict[str, int]:
         """
         智能同步数据到外部存储(Neo4j和Milvus)
-        
-        参数:
-            force_full_sync: 强制全量同步所有数据
-            auto_detect_first_sync: 自动检测是否为首次同步，如果是则执行全量同步
-            sync_nodes: 是否同步节点到Milvus
-            sync_relationships: 是否同步关系到Neo4j
-        
-        返回:
-            Dict[str, int]: 同步统计信息
         """
         stats = {
             "nodes_synced": 0,
             "nodes_failed": 0,
             "relationships_synced": 0,
             "relationships_failed": 0,
-            "sync_mode": "incremental"  # 'incremental', 'full', 'auto_full'
+            "sync_mode": "incremental"
         }
         
-        # 确定同步模式
-        is_first_sync = False
-        
-        if auto_detect_first_sync and not force_full_sync:
-            # 自动检测是否为首次同步
-            is_first_sync = self._detect_first_sync()
-            if is_first_sync:
-                force_full_sync = True
-                stats["sync_mode"] = "auto_full"
-                logging.info("检测到首次同步，将执行全量同步")
-        
-        if force_full_sync:
-            stats["sync_mode"] = "full" if not is_first_sync else "auto_full"
-            logging.info(f"开始全量同步到外部存储...")
-        else:
-            logging.info("开始增量同步到外部存储...")
-        
-        # 1. 同步节点到Milvus
+        # 1. 同步节点到Milvus（通过SemanticMap）
         if sync_nodes and self.semantic_map._external_storage:
-            node_stats = self._sync_nodes_to_milvus(force_full_sync)
-            stats.update(node_stats)
+            semantic_map_stats = self.semantic_map.sync_to_external(force_full_sync)
+            stats["nodes_synced"] = semantic_map_stats[0] if isinstance(semantic_map_stats, tuple) else semantic_map_stats.get("nodes_synced", 0)
+            stats["nodes_failed"] = semantic_map_stats[1] if isinstance(semantic_map_stats, tuple) else semantic_map_stats.get("nodes_failed", 0)
         
         # 2. 同步关系到Neo4j
         if sync_relationships and self._neo4j_connection:
@@ -692,8 +579,6 @@ class SemanticGraph:
         
         # 3. 更新同步状态
         if stats["nodes_synced"] > 0 or stats["relationships_synced"] > 0:
-            self._last_sync_time = datetime.now()
-            # 如果是全量同步，清理所有修改标记
             if force_full_sync:
                 self._clear_all_dirty_flags()
         
@@ -701,109 +586,15 @@ class SemanticGraph:
         total_success = stats["nodes_synced"] + stats["relationships_synced"]
         total_failed = stats["nodes_failed"] + stats["relationships_failed"]
         
+        sync_mode = "full" if force_full_sync else "incremental"
+        stats["sync_mode"] = sync_mode
+        
         logging.info(
-            f"同步完成 ({stats['sync_mode']})。"
+            f"SemanticGraph同步完成 ({sync_mode})。"
             f"节点: 成功={stats['nodes_synced']}, 失败={stats['nodes_failed']}; "
             f"关系: 成功={stats['relationships_synced']}, 失败={stats['relationships_failed']}; "
             f"总计: 成功={total_success}, 失败={total_failed}"
         )
-        
-        return stats
-
-    def _detect_first_sync(self) -> bool:
-        """检测是否为首次同步"""
-        try:
-            # 检查是否有同步历史记录
-            if self._last_sync_time is not None:
-                return False
-            
-            # 检查外部存储是否为空
-            is_milvus_empty = True
-            is_neo4j_empty = True
-            
-            # 检查Milvus是否有数据
-            if self.semantic_map._external_storage:
-                try:
-                    # 尝试获取少量数据来检测是否为空
-                    sample_units = self.semantic_map._external_storage.get_units_batch([], limit=1)
-                    is_milvus_empty = len(sample_units) == 0
-                except Exception as e:
-                    logging.warning(f"检测Milvus数据状态失败: {e}")
-                    is_milvus_empty = True
-            
-            # 检查Neo4j是否有数据
-            if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
-                try:
-                    # 获取少量节点来检测是否为空
-                    all_node_ids = self._neo4j_connection.get_all_node_ids(limit=1)
-                    is_neo4j_empty = len(all_node_ids) == 0
-                except Exception as e:
-                    logging.warning(f"检测Neo4j数据状态失败: {e}")
-                    is_neo4j_empty = True
-            
-            # 如果外部存储都为空，则认为是首次同步
-            return is_milvus_empty and is_neo4j_empty
-            
-        except Exception as e:
-            logging.error(f"检测首次同步状态失败: {e}")
-            return False
-
-    def _sync_nodes_to_milvus(self, force_full_sync: bool) -> Dict[str, int]:
-        """同步节点到Milvus"""
-        stats = {"nodes_synced": 0, "nodes_failed": 0}
-        
-        # 确定要同步的节点
-        if force_full_sync:
-            nodes_to_sync = list(self.semantic_map.memory_units.keys())
-            logging.info(f"全量同步: 准备同步 {len(nodes_to_sync)} 个节点到Milvus")
-        else:
-            nodes_to_sync = list(self._nodes_dirty_flag)
-            logging.info(f"增量同步: 准备同步 {len(nodes_to_sync)} 个修改的节点到Milvus")
-        
-        # 同步节点
-        for uid in nodes_to_sync:
-            unit = self.semantic_map.memory_units.get(uid)
-            if not unit:
-                stats["nodes_failed"] += 1
-                continue
-            
-            # 获取节点所属空间
-            space_names = []
-            for space_name, space in self.semantic_map.memory_spaces.items():
-                if uid in space.get_memory_uids():
-                    space_names.append(space_name)
-            
-            # 同步到Milvus
-            try:
-                if self.semantic_map._external_storage.add_unit(unit, space_names):
-                    stats["nodes_synced"] += 1
-                    self._nodes_dirty_flag.discard(uid)
-                    self._modified_units.discard(uid)
-                    logging.debug(f"节点 '{uid}' 已同步到Milvus")
-                else:
-                    stats["nodes_failed"] += 1
-                    logging.warning(f"节点 '{uid}' 同步到Milvus失败")
-            except Exception as e:
-                stats["nodes_failed"] += 1
-                logging.error(f"同步节点 '{uid}' 到Milvus时出错: {e}")
-        
-        # 处理已删除的节点
-        if self._deleted_units:
-            deleted_nodes = list(self._deleted_units)
-            logging.info(f"处理 {len(deleted_nodes)} 个已删除的节点")
-            
-            for uid in deleted_nodes:
-                try:
-                    if self.semantic_map._external_storage.delete_unit(uid):
-                        self._deleted_units.discard(uid)
-                        stats["nodes_synced"] += 1
-                        logging.debug(f"已删除节点 '{uid}' 从Milvus中移除")
-                    else:
-                        stats["nodes_failed"] += 1
-                        logging.warning(f"从Milvus删除节点 '{uid}' 失败")
-                except Exception as e:
-                    stats["nodes_failed"] += 1
-                    logging.error(f"从Milvus删除节点 '{uid}' 时出错: {e}")
         
         return stats
 
@@ -894,39 +685,10 @@ class SemanticGraph:
         """完整导出所有节点和关系到外部存储"""
         return self.sync_to_external(force_full_sync=True, auto_detect_first_sync=False)
 
-    # def incremental_export(self) -> Dict[str, int]:
-    #     """增量导出修改过的节点和关系到外部存储"""
-    #     return self.sync_to_external(force_full_sync=False)
+    # ==============================
+    # 保持原有的查询和遍历API
+    # ==============================
 
-    # def full_export(self) -> Dict[str, int]:
-    #     """完整导出所有节点和关系到外部存储"""
-    #     logging.info("开始全量导出...")
-        
-    #     # 获取所有还未加载到内存的节点ID
-    #     if self._neo4j_connection:
-    #         try:
-    #             # 获取Neo4j中的所有节点ID
-    #             all_node_ids = self._neo4j_connection.get_all_node_ids()
-                
-    #             # 过滤出不在内存中的节点
-    #             missing_ids = [uid for uid in all_node_ids if uid not in self.semantic_map.memory_units]
-                
-    #             # 分批加载这些节点
-    #             if missing_ids:
-    #                 batch_size = 100
-    #                 for i in range(0, len(missing_ids), batch_size):
-    #                     batch_ids = missing_ids[i:i+batch_size]
-    #                     self.swap_in_nodes(batch_ids)
-                    
-    #                 logging.info(f"已从外部存储加载 {len(missing_ids)} 个缺失节点")
-                    
-    #         except Exception as e:
-    #             logging.error(f"获取所有节点ID失败: {e}")
-        
-    #     # 执行全量同步
-    #     return self.sync_to_external(force_full_sync=True)
-
-    # 保持原有的查询API不变
     def get_unit_data(self, uid: str) -> Optional[MemoryUnit]:
         """从底层的 SemanticMap 检索内存单元对象。"""
         return self.get_unit(uid)
@@ -934,26 +696,6 @@ class SemanticGraph:
     def build_semantic_map_index(self):
         """构建底层 SemanticMap 的 FAISS 索引。"""
         self.semantic_map.build_index()
-
-    def search_similarity_in_graph(self,
-                                   query_text: Optional[str] = None,
-                                   query_embedding: Optional[np.ndarray] = None,
-                                   query_image_path: Optional[str] = None,
-                                   k: int = 5,
-                                   space_name: Optional[str] = None,
-                                   filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
-        """
-        在图谱中执行语义相似性搜索 (委托给 SemanticMap)。
-        """
-        if query_embedding is not None:
-            return self.semantic_map.search_similarity_by_embedding(query_embedding, k, space_name, filter_uids)
-        elif query_text is not None:
-            return self.semantic_map.search_similarity_by_text(query_text, k, space_name, filter_uids)
-        elif query_image_path is not None:
-            return self.semantic_map.search_similarity_by_image(query_image_path, k, space_name, filter_uids)
-        else:
-            logging.warning("必须提供 query_text, query_embedding 或 query_image_path 之一进行相似性搜索。")
-            return []
 
     def traverse_explicit_nodes(self,
                                 uid: str,
@@ -1007,7 +749,7 @@ class SemanticGraph:
         if space_name:
             space = self.semantic_map.get_memory_space(space_name)
             if space:
-                space_uids = space.get_memory_uids()
+                space_uids = space.get_unit_uids()
                 neighbor_ids.intersection_update(space_uids)
             else:
                 logging.warning(f"内存空间 '{space_name}' 未找到，无法按空间过滤邻居。")
@@ -1046,15 +788,6 @@ class SemanticGraph:
             if len(results) >= k:  # 如果已达到k个结果
                 break
         return results
-
-    # MemorySpace 相关 (通过 SemanticMap 操作)
-    def create_memory_space_in_map(self, space_name: str) -> MemorySpace:
-        """在底层的 SemanticMap 中创建或获取一个内存空间。"""
-        return self.semantic_map.create_memory_space(space_name)
-
-    def add_unit_to_space_in_map(self, uid: str, space_name: str):
-        """将一个内存单元添加到 SemanticMap 中的指定内存空间。"""
-        self.semantic_map.add_unit_to_space(uid, space_name)
 
     def display_graph_summary(self):
         """打印图谱的摘要信息。"""
@@ -1095,7 +828,167 @@ class SemanticGraph:
         print(summary)
         logging.info(summary.replace("\n", " | "))
 
-    # 保持原有的持久化方法
+    # ==============================
+    # 与Hippo保持一致的方法
+    # ==============================
+
+    def get_all_memory_space_names(self) -> List[str]:
+        """
+        获取所有MemorySpace名称（递归，去重）。
+        """
+        return self.semantic_map.get_all_memory_space_names()
+
+    def get_memory_space_structures(self) -> List[dict]:
+        """
+        递归导出所有MemorySpace嵌套结构（树/嵌套dict），
+        每个ms展示：名称、unit uid列表、所有unit的raw_data字段全集、子空间。
+        返回列表，每个元素为一个ms的结构。
+        """
+        return self.semantic_map.get_memory_space_structures()
+
+    def deduplicate_units(self, units: List[MemoryUnit]) -> List[MemoryUnit]:
+        """去重单元列表"""
+        return self.semantic_map.deduplicate_units(units)
+
+    def filter_memory_units(
+        self, 
+        candidate_units: Optional[List[MemoryUnit]] = None, 
+        filter_condition: Optional[Dict] = None, 
+        ms_names: Optional[List[str]] = None, 
+        recursive: bool = True
+    ) -> List[MemoryUnit]:
+        """
+        过滤内存单元，支持多种过滤条件
+        """
+        if candidate_units is None:
+            if ms_names:
+                candidate_units = self.get_units_in_memory_space(ms_names, recursive=recursive)
+            else:
+                candidate_units = list(self.semantic_map.memory_units.values())
+
+        def match(unit):
+            if not filter_condition:
+                return True
+            for field, cond in filter_condition.items():
+                # 优先从unit对象本身取字段（如uid），否则从raw_data取
+                val = getattr(unit, field, None)
+                if val is None:
+                    val = unit.raw_data.get(field)
+                for op, op_val in cond.items():
+                    if op == "eq" and not (val == op_val):
+                        return False
+                    if op == "ne" and not (val != op_val):
+                        return False
+                    if op == "in" and not (val in op_val):
+                        return False
+                    if op == "nin" and not (val not in op_val):
+                        return False
+                    if op == "gt" and not (val > op_val):
+                        return False
+                    if op == "gte" and not (val >= op_val):
+                        return False
+                    if op == "lt" and not (val < op_val):
+                        return False
+                    if op == "lte" and not (val <= op_val):
+                        return False
+                    if op == "contain" and not (op_val in str(val)):
+                        return False
+                    if op == "not_contain" and not (op_val not in str(val)):
+                        return False
+            return True
+
+        return [u for u in candidate_units if match(u)]
+
+    def get_explicit_neighbors(
+        self, 
+        uids: List[str], 
+        rel_type: Optional[str] = None, 
+        ms_names: Optional[List[str]] = None, 
+        direction: str = "successors", 
+        recursive: bool = True
+    ) -> List[MemoryUnit]:
+        """
+        获取显式邻居节点
+        """
+        result = []
+        for uid in uids:
+            if direction == "successors":
+                neighbors = self.nx_graph.successors(uid)
+            elif direction == "predecessors":
+                neighbors = self.nx_graph.predecessors(uid)
+            else:
+                neighbors = set(self.nx_graph.successors(uid)) | set(
+                    self.nx_graph.predecessors(uid)
+                )
+            for n in neighbors:
+                if rel_type:
+                    edge = (
+                        self.nx_graph.get_edge_data(uid, n)
+                        if direction != "predecessors"
+                        else self.nx_graph.get_edge_data(n, uid)
+                    )
+                    if not edge or edge.get("type") != rel_type:
+                        continue
+                unit = self.semantic_map.get_unit(n)
+                if unit is not None:
+                    result.append(unit)
+        
+        if ms_names:
+            ms_units = set(
+                u.uid
+                for u in self.get_units_in_memory_space(ms_names, recursive=recursive)
+            )
+            result = [u for u in result if u.uid in ms_units]
+        return result
+
+    def get_implicit_neighbors(
+        self, 
+        uid: str, 
+        top_k: int = 5, 
+        ms_names: Optional[List[str]] = None, 
+        recursive: bool = True
+    ) -> List[MemoryUnit]:
+        """
+        获取隐式邻居节点（基于语义相似性）
+        """
+        unit = self.semantic_map.get_unit(uid)
+        if not unit or unit.embedding is None:
+            return []
+        
+        if ms_names:
+            units = self.get_units_in_memory_space(ms_names, recursive=recursive)
+        else:
+            units = list(self.semantic_map.memory_units.values())
+        
+        # 过滤有效embedding的单元
+        valid_units = [u for u in units if u.embedding is not None and u.uid != uid]
+        if not valid_units:
+            return []
+        
+        arr = np.array([u.embedding for u in valid_units], dtype=np.float32)
+        
+        try:
+            import faiss
+            index = faiss.IndexFlatL2(arr.shape[1])
+            index.add(arr)
+            D, I = index.search(
+                unit.embedding.reshape(1, -1).astype(np.float32), min(top_k, arr.shape[0])
+            )
+            results = []
+            for i in range(len(I[0])):
+                idx = int(I[0][i])
+                if I[0][i] == -1:
+                    continue
+                results.append(valid_units[idx])
+            return results
+        except ImportError:
+            logging.error("FAISS不可用，无法进行隐式邻居搜索")
+            return []
+
+    # ==============================
+    # 持久化方法（更新兼容性）
+    # ==============================
+
     def save_graph(self, directory_path: str):
         """保存 SemanticGraph 的状态到指定目录。"""
         os.makedirs(directory_path, exist_ok=True)
@@ -1132,61 +1025,6 @@ class SemanticGraph:
             pickle.dump(management_state, f)
 
         logging.info(f"SemanticGraph 已保存到目录: '{directory_path}'")
-
-    def export_to_neo4j(
-        self, 
-        uri: str = "bolt://localhost:7687", 
-        user: str = "neo4j", 
-        password: str = "password",
-        database: str = "neo4j"
-        ) -> bool:
-        """将SemanticGraph中的节点和关系导出到Neo4j数据库
-        注意：此方法已废弃，推荐使用 sync_to_external() 方法"""
-
-        logging.warning("export_to_neo4j() 方法已废弃，推荐使用 sync_to_external() 方法")
-        
-        try:
-            # 创建Neo4j操作类 - 修改参数名以匹配Neo4jOperator的定义
-            neo4j_op = Neo4jOperator(
-                neo4j_uri=uri,           # 从uri改为neo4j_uri
-                neo4j_user=user,         # 从user改为neo4j_user
-                neo4j_password=password, # 从password改为neo4j_password
-                neo4j_database=database  # 从database改为neo4j_database
-            )
-            
-            if not neo4j_op.neo4j_connected:
-                logging.error("连接Neo4j失败，无法导出数据")
-                return False
-            
-            # 导出所有内存单元
-            unit_success_count = 0
-            for uid, unit in self.semantic_map.memory_units.items():
-                if neo4j_op.add_unit(unit):
-                    unit_success_count += 1
-                else:
-                    logging.warning(f"导出内存单元 '{uid}' 到Neo4j失败")
-            
-            # 导出所有关系
-            rel_success_count = 0
-            for source, target, data in self.nx_graph.edges(data=True):
-                # 获取关系类型，默认为"RELATED_TO"
-                rel_type = data.get("type", "RELATED_TO")
-                # 移除type，因为它已用作关系类型
-                properties = {k: v for k, v in data.items() if k != "type"}
-                
-                if neo4j_op.add_relationship(source, target, rel_type, properties):
-                    rel_success_count += 1
-                else:
-                    logging.warning(f"导出从 '{source}' 到 '{target}' 的 '{rel_type}' 关系到Neo4j失败")
-            
-            logging.info(f"成功导出 {unit_success_count}/{len(self.semantic_map.memory_units)} 个内存单元和 {rel_success_count}/{self.nx_graph.number_of_edges()} 个关系到Neo4j")
-            neo4j_op.close()
-            
-            return unit_success_count > 0 or rel_success_count > 0
-            
-        except Exception as e:
-            logging.error(f"导出到Neo4j失败: {e}")
-        return False
 
     @classmethod
     def load_graph(cls, directory_path: str,
@@ -1251,3 +1089,63 @@ class SemanticGraph:
 
         logging.info(f"SemanticGraph 已从目录 '{directory_path}' 加载。")
         return instance
+
+    # ==============================
+    # 兼容旧接口的方法
+    # ==============================
+
+    def export_to_neo4j(
+        self, 
+        uri: str = "bolt://localhost:7687", 
+        user: str = "neo4j", 
+        password: str = "password",
+        database: str = "neo4j"
+        ) -> bool:
+        """将SemanticGraph中的节点和关系导出到Neo4j数据库
+        注意：此方法已废弃，推荐使用 sync_to_external() 方法"""
+
+        logging.warning("export_to_neo4j() 方法已废弃，推荐使用 sync_to_external() 方法")
+        
+        try:
+            # 创建Neo4j操作类
+            neo4j_op = Neo4jOperator(
+                neo4j_uri=uri,
+                neo4j_user=user,
+                neo4j_password=password,
+                neo4j_database=database
+            )
+            
+            if not neo4j_op.neo4j_connected:
+                logging.error("连接Neo4j失败，无法导出数据")
+                return False
+            
+            # 导出所有内存单元
+            unit_success_count = 0
+            for uid, unit in self.semantic_map.memory_units.items():
+                if neo4j_op.add_unit(unit):
+                    unit_success_count += 1
+                else:
+                    logging.warning(f"导出内存单元 '{uid}' 到Neo4j失败")
+            
+            # 导出所有关系
+            rel_success_count = 0
+            for source, target, data in self.nx_graph.edges(data=True):
+                # 获取关系类型，默认为"RELATED_TO"
+                rel_type = data.get("type", "RELATED_TO")
+                # 移除type，因为它已用作关系类型
+                properties = {k: v for k, v in data.items() if k != "type"}
+                
+                if neo4j_op.add_relationship(source, target, rel_type, properties):
+                    rel_success_count += 1
+                else:
+                    logging.warning(f"导出从 '{source}' 到 '{target}' 的 '{rel_type}' 关系到Neo4j失败")
+            
+            logging.info(f"成功导出 {unit_success_count}/{len(self.semantic_map.memory_units)} 个内存单元和 {rel_success_count}/{self.nx_graph.number_of_edges()} 个关系到Neo4j")
+            neo4j_op.close()
+            
+            return unit_success_count > 0 or rel_success_count > 0
+            
+        except Exception as e:
+            logging.error(f"导出到Neo4j失败: {e}")
+        return False
+

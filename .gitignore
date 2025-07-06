@@ -6,4 +6,5 @@ __pycache__/
 outdate/
 */dataset/
 */results/
+*/conversation_semantic_storage/
 benchmark/scripts/env.sh

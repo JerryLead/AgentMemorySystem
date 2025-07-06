@@ -27,19 +27,42 @@ class LLMClient:
     def generate_answer(self, 
                        prompt: str, 
                        temperature: float = 0.1, 
-                       max_tokens: int = 500) -> str:
-        """生成答案"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            logging.error(f"LLM生成失败: {e}")
-            return f"生成失败: {str(e)}"
+                       max_tokens: int = 500,
+                       json_response = False) -> str:
+        """生成答案
+        :param prompt: 输入提示
+        :param temperature: 生成的随机性，0.0-1.0之间
+        :param max_tokens: 最大生成token数
+        :param json_response: 是否返回JSON格式的响应(仅限deepseek-chat)
+        """
+        
+        if json_response:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={
+                        'type': 'json_object'
+                    }
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                logging.error(f"LLM生成失败: {e}")
+                return f"生成失败: {str(e)}"
+        else:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                logging.error(f"LLM生成失败: {e}")
+                return f"生成失败: {str(e)}"
     
     def batch_generate(self, 
                       prompts: List[str], 

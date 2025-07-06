@@ -1,19 +1,16 @@
-from datetime import datetime
+import logging
 import os
 import pickle
-import logging
-from typing import Dict, Any, Optional, List, Set, Tuple
-
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 
-from .milvus_operator import MilvusOperator
 from .memory_unit import MemoryUnit
 from .memory_space import MemorySpace
-from .llm_cache import LLMCacheAdvisor
-from .llm_cache import CacheAnalysisData
+from .milvus_operator import MilvusOperator
 
 class SemanticMap:
     """
@@ -47,10 +44,6 @@ class SemanticMap:
         self.faiss_index: Optional[faiss.Index] = None # FAISS 索引
         
         # FAISS ID 到 MemoryUnit ID 的映射 (以及反向映射)
-        # FAISS 内部使用从0开始的连续整数ID。我们需要将这些ID映射回我们的MemoryUnit ID。
-        # 当使用 IndexIDMap 时，我们传递给 add_with_ids 的 ID 可以是我们自己的整数ID。
-        # 我们将使用一个内部计数器或 MemoryUnit ID 的哈希（如果需要稳定且非连续的ID）
-        # 为简单起见，我们将维护一个从 MemoryUnit.id 到一个内部 faiss_id (int64) 的映射。
         self._uid_to_internal_faiss_id: Dict[str, int] = {}
         self._internal_faiss_id_counter: int = 0 # 用于生成唯一的内部 FAISS ID
 
@@ -58,20 +51,20 @@ class SemanticMap:
         self._modified_units = set()  # 被修改的单元ID集合
         self._deleted_units = set()   # 已删除但尚未同步到磁盘的单元ID
         self._last_sync_time = None   # 上次与外部存储同步的时间
-        self._external_storage:MilvusOperator = None # 指向外部存储的连接（Milvus）
+        self._external_storage: Optional[MilvusOperator] = None # 指向外部存储的连接（Milvus）
         self._max_memory_units = 10000 # 内存中最大单元数，超过则触发换页
         self._access_counts = {}      # 记录每个单元的访问次数，用于LRU策略
 
         try:
-            self.text_model = SentenceTransformer(text_embedding_model_name)
+            # 初始化图像和文本嵌入模型
             self.image_model = SentenceTransformer(image_embedding_model_name)
-            # 验证嵌入维度是否与模型输出匹配 (可选，但推荐)
-            # test_text_emb = self.text_model.encode("test")
-            # if test_text_emb.shape[0] != embedding_dim:
-            #     logging.warning(f"文本模型输出维度 {test_text_emb.shape[0]} 与指定的 embedding_dim {embedding_dim} 不符。")
+            self.text_model = SentenceTransformer(text_embedding_model_name)
+            logging.info(f"已初始化嵌入模型：图像模型='{image_embedding_model_name}'，文本模型='{text_embedding_model_name}'")
         except Exception as e:
-            logging.error(f"初始化 SentenceTransformer 模型失败: {e}")
-            raise
+            logging.error(f"无法初始化嵌入模型: {e}")
+            # 使用更简单的默认模型作为回退
+            self.image_model = None
+            self.text_model = None
             
         self._init_faiss_index()
         logging.info(f"SemanticMap 已初始化。嵌入维度: {self.embedding_dim}, FAISS索引类型: '{self.faiss_index_type}'。")
@@ -79,23 +72,15 @@ class SemanticMap:
     def _init_faiss_index(self):
         """初始化或重新初始化 FAISS 索引。"""
         try:
-            # IndexIDMap2 允许我们使用自己的64位整数ID
-            # 我们将使用一个内部计数器生成的ID，并维护 uid -> internal_faiss_id 的映射
-            base_index = faiss.index_factory(self.embedding_dim, self.faiss_index_type.replace("IDMap,","").replace("IDMap2,","")) # 例如 "Flat" or "HNSW32,Flat"
-            if "IDMap" not in self.faiss_index_type and "IDMap2" not in self.faiss_index_type:
-                 logging.warning(f"FAISS索引类型 '{self.faiss_index_type}' 不包含 'IDMap' 或 'IDMap2'。建议使用它们以支持按ID删除和高效过滤。将尝试包装基础索引。")
-                 # 如果用户没有指定IDMap，我们尝试添加它
-                 if hasattr(faiss, 'IndexIDMap2'):
-                     self.faiss_index = faiss.IndexIDMap2(base_index)
-                 else:
-                     self.faiss_index = faiss.IndexIDMap(base_index) # 后备
-            else: # 用户已指定IDMap或IDMap2
-                 self.faiss_index = faiss.index_factory(self.embedding_dim, self.faiss_index_type)
-
-            if self.faiss_index_type.startswith("IDMap,") and not hasattr(faiss, 'IndexIDMap'): # 检查兼容性
-                logging.warning("请求了 IndexIDMap 但可能不可用，尝试 IndexIDMap2。")
-                # 进一步的兼容性逻辑可能需要
-
+            if self.faiss_index_type.startswith("IDMap,"):
+                if not hasattr(faiss, 'IndexIDMap'):
+                    raise ImportError("FAISS 版本不支持 IndexIDMap")
+                base_index_type = self.faiss_index_type.split("IDMap,", 1)[1]
+                base_index = faiss.index_factory(self.embedding_dim, base_index_type)
+                self.faiss_index = faiss.IndexIDMap(base_index)
+            else:
+                self.faiss_index = faiss.index_factory(self.embedding_dim, self.faiss_index_type)
+            
             logging.info(f"FAISS 索引 '{self.faiss_index_type}' 已初始化。总向量数: {self.faiss_index.ntotal if self.faiss_index else 0}")
         except Exception as e:
             logging.error(f"初始化 FAISS 索引 '{self.faiss_index_type}' 失败: {e}")
@@ -110,6 +95,9 @@ class SemanticMap:
             logging.warning("尝试为无效文本生成嵌入。")
             return None
         try:
+            if self.text_model is None:
+                logging.error("文本嵌入模型未初始化")
+                return None
             emb = self.text_model.encode(text)
             return emb.astype(np.float32)
         except Exception as e:
@@ -125,6 +113,9 @@ class SemanticMap:
             logging.error(f"图像文件未找到: {image_path}")
             return None
         try:
+            if self.image_model is None:
+                logging.error("图像嵌入模型未初始化")
+                return None
             img = Image.open(image_path)
             emb = self.image_model.encode(img)
             return emb.astype(np.float32)
@@ -137,12 +128,6 @@ class SemanticMap:
                                      content_type: Optional[str] = None) -> Optional[np.ndarray]:
         """
         为内存单元生成嵌入向量。
-        参数:
-            unit (MemoryUnit): 要生成嵌入的内存单元。
-            explicit_content (Optional[Any]): 用于嵌入的显式内容 (文本字符串或图像路径)。
-            content_type (Optional[str]): "text" 或 "image_path"，指示 explicit_content 的类型。
-        返回:
-            np.ndarray 或 None: 生成的嵌入向量，如果失败则为 None。
         """
         embedding = None
         if explicit_content and content_type:
@@ -151,30 +136,170 @@ class SemanticMap:
             elif content_type == "image_path":
                 embedding = self._get_image_embedding(str(explicit_content))
             else:
-                logging.warning(f"不支持的内容类型 '{content_type}' 用于为单元 '{unit.uid}' 生成嵌入。")
+                logging.warning(f"未知的内容类型 '{content_type}'。使用默认推断方法。")
         else: # 尝试从 unit.raw_data 推断
             image_path = unit.raw_data.get(self.DEFAULT_IMAGE_EMBEDDING_KEY)
             text_content = unit.raw_data.get(self.DEFAULT_TEXT_EMBEDDING_KEY)
 
             if image_path and isinstance(image_path, str):
                 embedding = self._get_image_embedding(image_path)
-                if embedding is not None:
-                    logging.debug(f"已为单元 '{unit.uid}' 从其值中的图像路径 '{image_path}' 生成嵌入。")
             
-            if embedding is None and text_content and isinstance(text_content, str): # 如果图像嵌入失败或未提供图像，则尝试文本
+            if embedding is None and text_content and isinstance(text_content, str):
                 embedding = self._get_text_embedding(text_content)
-                if embedding is not None:
-                    logging.debug(f"已为单元 '{unit.uid}' 从其值中的文本内容生成嵌入。")
             
             if embedding is None:
-                logging.warning(f"无法从单元 '{unit.uid}' 的值中找到合适的内容来生成嵌入。请检查键 '{self.DEFAULT_IMAGE_EMBEDDING_KEY}' 或 '{self.DEFAULT_TEXT_EMBEDDING_KEY}'。")
+                logging.debug(f"为单元 '{unit.uid}' 无法从raw_data生成嵌入。没有找到有效的文本或图像内容。")
         
         if embedding is not None and embedding.shape[0] != self.embedding_dim:
             logging.error(f"为单元 '{unit.uid}' 生成的嵌入维度 ({embedding.shape[0]}) 与期望维度 ({self.embedding_dim}) 不符。")
             return None
         return embedding
-    
-    ### 数据库操作函数
+
+    # ==============================
+    # 新的MemorySpace管理方法（兼容新架构）
+    # ==============================
+
+    def create_memory_space(self, space_name: str) -> MemorySpace:
+        """创建或获取一个内存空间"""
+        if space_name not in self.memory_spaces:
+            space = MemorySpace(space_name)
+            space._set_semantic_map_ref(self)  # 设置引用
+            self.memory_spaces[space_name] = space
+            logging.info(f"内存空间 '{space_name}' 已创建")
+        return self.memory_spaces[space_name]
+
+    def get_memory_space(self, space_name: str) -> Optional[MemorySpace]:
+        """通过名称获取内存空间"""
+        return self.memory_spaces.get(space_name)
+
+    def add_unit_to_space(self, unit_or_uid: Union[str, MemoryUnit], space_name: str):
+        """
+        智能将内存单元添加到内存空间：自动判断输入是UID字符串还是MemoryUnit对象
+        """
+        if isinstance(unit_or_uid, str):
+            uid = unit_or_uid
+        elif hasattr(unit_or_uid, 'uid'):
+            uid = unit_or_uid.uid
+        else:
+            raise TypeError(f"add_unit_to_space() 期望 str(UID) 或 MemoryUnit 对象，得到 {type(unit_or_uid)}")
+        
+        if uid not in self.memory_units:
+            logging.warning(f"尝试将不存在的内存单元 '{uid}' 添加到空间 '{space_name}'")
+            return
+        
+        space = self.create_memory_space(space_name)  # 如果空间不存在则创建
+        space.add_unit(uid)  # 使用智能方法
+
+    def remove_unit_from_space(self, unit_or_uid: Union[str, MemoryUnit], space_name: str):
+        """
+        智能从内存空间移除内存单元：自动判断输入类型
+        """
+        if isinstance(unit_or_uid, str):
+            uid = unit_or_uid
+        elif hasattr(unit_or_uid, 'uid'):
+            uid = unit_or_uid.uid
+        else:
+            raise TypeError(f"remove_unit_from_space() 期望 str(UID) 或 MemoryUnit 对象，得到 {type(unit_or_uid)}")
+        
+        space = self.get_memory_space(space_name)
+        if space:
+            space.remove_unit(uid)  # 使用智能方法
+        else:
+            logging.warning(f"尝试从不存在的内存空间 '{space_name}' 移除单元 '{uid}'")
+
+    def add_space_to_space(self, child_space_or_name: Union[str, MemorySpace], parent_space_name: str):
+        """
+        智能将子空间添加到父空间：自动判断输入类型
+        """
+        if isinstance(child_space_or_name, str):
+            child_space_name = child_space_or_name
+        elif hasattr(child_space_or_name, 'name'):
+            child_space_name = child_space_or_name.name
+        else:
+            raise TypeError(f"add_space_to_space() 期望 str(名称) 或 MemorySpace 对象，得到 {type(child_space_or_name)}")
+        
+        if child_space_name not in self.memory_spaces:
+            logging.warning(f"子空间 '{child_space_name}' 不存在")
+            return
+        
+        parent_space = self.create_memory_space(parent_space_name)
+        parent_space.add_child_space(child_space_name)  # 使用智能方法
+
+    def get_units_in_memory_space(self, ms_names: Union[str, List[str]], recursive: bool = True) -> List[MemoryUnit]:
+        """
+        获取指定ms_names下所有unit，支持递归，支持多ms，自动去重
+        """
+        # 确保ms_names是列表
+        if isinstance(ms_names, str):
+            ms_names = [ms_names]
+        
+        all_uids = set()
+        
+        for space_name in ms_names:
+            space = self.memory_spaces.get(space_name)
+            if space:
+                if recursive:
+                    all_uids.update(space.get_all_unit_uids(recursive=True))
+                else:
+                    all_uids.update(space.get_unit_uids())
+            else:
+                logging.warning(f"内存空间 '{space_name}' 不存在")
+        
+        # 转换UID为MemoryUnit对象
+        units = []
+        for uid in all_uids:
+            unit = self.memory_units.get(uid)
+            if unit:
+                units.append(unit)
+            else:
+                logging.warning(f"MemoryUnit '{uid}' 在内存中不存在")
+        
+        return units
+
+    def search_similarity_in_graph(
+        self, query_text: str, top_k: int = 5, ms_names: Optional[List[str]] = None, recursive: bool = True
+    ) -> List[Tuple[MemoryUnit, float]]:
+        """在指定的MemorySpace中进行语义搜索"""
+        if ms_names:
+            units = self.get_units_in_memory_space(ms_names, recursive=recursive)
+        else:
+            units = list(self.memory_units.values())
+        
+        if not units:
+            return []
+        
+        query_vec = self._get_text_embedding(query_text)
+        if query_vec is None:
+            return []
+        
+        # 过滤有有效embedding的单元
+        valid_units = [u for u in units if u.embedding is not None]
+        if not valid_units:
+            return []
+        
+        arr = np.array([u.embedding for u in valid_units], dtype=np.float32)
+        
+        try:
+            import faiss
+            index = faiss.IndexFlatL2(arr.shape[1])
+            index.add(arr)
+            D, I = index.search(
+                query_vec.reshape(1, -1).astype(np.float32), min(top_k, arr.shape[0])
+            )
+            results = []
+            for i in range(len(I[0])):
+                idx = int(I[0][i])
+                if I[0][i] == -1:
+                    continue
+                results.append((valid_units[idx], float(D[0][i])))
+            return results
+        except ImportError:
+            logging.error("FAISS不可用，无法进行语义搜索")
+            return []
+
+    # ==============================
+    # 数据库操作函数（保持兼容）
+    # ==============================
 
     def connect_external_storage(self, 
                             storage_type: str = "milvus",
@@ -185,9 +310,6 @@ class SemanticMap:
                             collection_name: str = "hippo_memory_units"):
         """
         连接到外部存储系统
-        参数:
-            storage_type: 存储类型，当前支持 "milvus"
-            其他参数: 特定存储系统的连接参数
         """
         if storage_type.lower() == "milvus":
             try:
@@ -200,13 +322,11 @@ class SemanticMap:
                     embedding_dim=self.embedding_dim
                 )
                 if self._external_storage.is_connected:
-                    # 确保集合已创建
-                    self._external_storage.create_collection()
-                    logging.info(f"已连接到外部存储: Milvus ({host}:{port})")
+                    logging.info(f"成功连接到外部存储 (Milvus): {host}:{port}")
                     return True
                 else:
+                    logging.error(f"连接到外部存储失败")
                     self._external_storage = None
-                    logging.error("连接到Milvus失败")
                     return False
             except Exception as e:
                 logging.error(f"初始化外部存储连接失败: {e}")
@@ -235,7 +355,7 @@ class SemanticMap:
             # 找出单元所属的所有空间
             space_names = []
             for space_name, space in self.memory_spaces.items():
-                if uid in space.get_memory_uids():
+                if space.contains_unit(uid):
                     space_names.append(space_name)
             
             # 使用MilvusOperator添加/更新单元
@@ -253,10 +373,6 @@ class SemanticMap:
     def sync_to_external(self, force_full_sync: bool = False):
         """
         智能同步数据到外部存储
-        参数:
-            force_full_sync: 强制全量同步所有数据
-        返回:
-            (success_count, fail_count): 成功和失败的单元数量
         """
         if not self._external_storage:
             logging.error("未连接到外部存储，无法同步")
@@ -269,11 +385,11 @@ class SemanticMap:
         sync_mode = "full" if force_full_sync else "incremental"
         
         # 自动检测首次同步
-        if not force_full_sync and not hasattr(self, '_last_sync_time') or self._last_sync_time is None:
+        if not force_full_sync and (not hasattr(self, '_last_sync_time') or self._last_sync_time is None):
             # 检查外部存储是否为空来判断是否为首次同步
             try:
                 # 尝试获取少量数据来检测是否为空
-                sample_units = self._external_storage.get_units_batch([], limit=1)
+                sample_units = self._external_storage.get_units_batch([])
                 if len(sample_units) == 0:
                     force_full_sync = True
                     sync_mode = "auto_full"
@@ -348,9 +464,7 @@ class SemanticMap:
                 units = self._external_storage.get_units_by_space(filter_space)[:limit]
             else:
                 # 为了避免一次性加载太多，我们需要实现分页加载
-                # 这里简化处理，获取有限数量的单元
                 logging.warning("从外部存储加载所有单元可能消耗大量内存，建议指定空间过滤")
-                # 由于MilvusOperator没有get_all_unit_ids方法，我们跳过这个实现
                 return 0
             
             load_count = 0
@@ -359,7 +473,7 @@ class SemanticMap:
                 if unit.uid not in self.memory_units or replace_existing:
                     # 检查内存限制
                     if len(self.memory_units) >= self._max_memory_units:
-                        self.swap_out(count=1)
+                        self.swap_out(count=int(self._max_memory_units * 0.1))
                     
                     self.memory_units[unit.uid] = unit
                     self._access_counts[unit.uid] = 0  # 初始化访问计数
@@ -367,8 +481,8 @@ class SemanticMap:
                     
                     # 处理单元的空间归属
                     if hasattr(unit, 'metadata') and isinstance(unit.metadata, dict):
-                        spaces = unit.metadata.get('spaces', [])
-                        for space_name in spaces:
+                        space_info = unit.metadata.get('spaces', [])
+                        for space_name in space_info:
                             self.add_unit_to_space(unit.uid, space_name)
             
             # 如果加载了单元，重建索引
@@ -381,23 +495,10 @@ class SemanticMap:
         except Exception as e:
             logging.error(f"从外部存储加载单元失败: {e}")
             return 0
-        
-    ### 内存上下文管理函数,新增对于LLM strategy的支持
-
-    def set_llm_cache_advisor(self, llm_client, model_name: str = "gpt-4"):
-        """设置LLM缓存顾问"""
-        self._llm_cache_advisor = LLMCacheAdvisor(llm_client, model_name)
-        self._recent_queries = []
-        self._last_accessed = {}
-        logging.info("LLM缓存顾问已启用")
 
     def swap_out(self, count: int = 100, strategy: str = "LRU", query_context: Optional[str] = None):
         """
         将最少使用的单元从内存移出到外部存储
-        参数:
-            count: 要移出的单元数量
-            strategy: 换出策略，支持 "LLM"、"LRU"、"LFU"
-            query_context: 当前查询上下文（用于LLM策略）
         """
         if not self._external_storage:
             logging.warning("没有配置外部存储，无法执行换页操作")
@@ -408,56 +509,28 @@ class SemanticMap:
             return
         
         # 根据策略确定要换出的单元
-        units_to_page_out = []
+        if strategy == "LRU":
+            # 按最后访问时间排序，最少最近使用的优先换出
+            sorted_units = sorted(
+                [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
+                key=lambda x: x[1]  # 按最后访问时间排序
+            )
+        elif strategy == "LFU":
+            # 按访问频率排序，访问次数最少的优先换出
+            sorted_units = sorted(
+                [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
+                key=lambda x: x[1]  # 按访问次数排序
+            )
+        else:  # 默认使用LRU
+            logging.warning(f"不支持的换出策略: {strategy}，使用LRU")
+            sorted_units = sorted(
+                [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
+                key=lambda x: x[1]
+            )
         
-        if strategy == "LLM" and hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
-            try:
-                # 使用LLM进行智能决策
-                analysis_data = self._llm_cache_advisor.analyze_cache_context(
-                    memory_units=self.memory_units,
-                    access_counts=self._access_counts,
-                    last_accessed=getattr(self, '_last_accessed', {}),
-                    current_query_context=query_context
-                )
-                
-                recommended_uids = self._llm_cache_advisor.recommend_eviction(
-                    analysis_data=analysis_data,
-                    eviction_count=count,
-                    current_query_context=query_context,
-                    recent_queries=getattr(self, '_recent_queries', [])
-                )
-                
-                units_to_page_out = [(uid, 0) for uid in recommended_uids]
-                logging.info(f"LLM推荐换出单元: {recommended_uids}")
-                
-            except Exception as e:
-                logging.error(f"LLM缓存决策失败: {e}，降级使用LRU算法")
-                strategy = "LRU"  # 降级到LRU
-        
-        # 如果是LRU、LFU策略，或者LLM策略失败后的降级
-        if strategy in ["LRU", "LFU"] or not units_to_page_out:
-            if strategy == "LRU":
-                # 按最后访问时间排序，最少最近使用的优先换出
-                sorted_units = sorted(
-                    [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
-                    key=lambda x: x[1]  # 按最后访问时间排序，时间越早越优先换出
-                )
-            elif strategy == "LFU":
-                # 按访问频率排序，访问次数最少的优先换出
-                sorted_units = sorted(
-                    [(uid, self._access_counts.get(uid, 0)) for uid in self.memory_units.keys()],
-                    key=lambda x: x[1]  # 按访问次数排序，次数越少越优先换出
-                )
-            else:  # 默认使用LRU
-                logging.warning(f"不支持的换出策略: {strategy}，使用LRU")
-                sorted_units = sorted(
-                    [(uid, getattr(self, '_last_accessed', {}).get(uid, 0)) for uid in self.memory_units.keys()],
-                    key=lambda x: x[1]
-                )
-            
-            # 限制换出数量
-            actual_count = min(count, len(sorted_units))
-            units_to_page_out = sorted_units[:actual_count]
+        # 限制换出数量
+        actual_count = min(count, len(sorted_units))
+        units_to_page_out = sorted_units[:actual_count]
         
         if not units_to_page_out:
             logging.debug("没有找到可换出的单元")
@@ -475,7 +548,7 @@ class SemanticMap:
             # 获取单元所属空间
             space_names = []
             for space_name, space in self.memory_spaces.items():
-                if uid in space.get_memory_uids():
+                if space.contains_unit(uid):
                     space_names.append(space_name)
             
             # 同步到外部存储
@@ -523,20 +596,9 @@ class SemanticMap:
         
         return None
 
-    def record_query(self, query: str, accessed_uids: List[str]):
-        """记录查询和访问的单元"""
-        self._recent_queries.append(query)
-        if len(self._recent_queries) > 10:  # 只保留最近10个查询
-            self._recent_queries = self._recent_queries[-10:]
-        
-        # 更新访问时间
-        current_time = datetime.now().timestamp()
-        for uid in accessed_uids:
-            self._last_accessed[uid] = current_time
-            if hasattr(self, '_llm_cache_advisor') and self._llm_cache_advisor:
-                self._llm_cache_advisor.record_access(uid, query)
-    
-    ### 内存单元操作函数
+    # ==============================
+    # 内存单元操作函数（更新兼容性）
+    # ==============================
     
     def add_unit(self,
             unit: MemoryUnit,
@@ -631,13 +693,14 @@ class SemanticMap:
         return None
 
     def delete_unit(self, uid: str, rebuild_index_immediately: bool = False):
-        """从语义地图中删除一个内存单元。"""
+        """从语义地图中删除一个内存单元"""
         if uid in self.memory_units:
             del self.memory_units[uid]
             
-            # 从所有内存空间中移除
+            # 从所有内存空间中移除此单元的引用
             for space_name, space_obj in self.memory_spaces.items():
-                space_obj.remove_unit(uid)
+                if space_obj.contains_unit(uid):
+                    space_obj.remove_unit(uid)
             
             # 从FAISS索引中移除
             if self.faiss_index and uid in self._uid_to_internal_faiss_id:
@@ -645,18 +708,16 @@ class SemanticMap:
                 try:
                     if hasattr(self.faiss_index, 'remove_ids'):
                         self.faiss_index.remove_ids(np.array([internal_id_to_remove], dtype=np.int64))
-                        logging.debug(f"内存单元 '{uid}' (内部FAISS ID: {internal_id_to_remove}) 已从FAISS索引中移除。")
+                        logging.debug(f"内存单元 '{uid}' 已从FAISS索引中移除")
                     del self._uid_to_internal_faiss_id[uid]
                 except Exception as e:
-                    logging.error(f"从FAISS索引中移除单元 '{uid}' 失败: {e}。建议重建索引。")
-            else:
-                logging.warning(f"单元 '{uid}' 不在FAISS ID映射中，可能未被索引或已被移除。")
+                    logging.error(f"从FAISS索引中移除单元 '{uid}' 失败: {e}")
 
-            logging.info(f"内存单元 '{uid}' 已从 SemanticMap 删除。")
+            logging.info(f"内存单元 '{uid}' 已从 SemanticMap 删除")
             if rebuild_index_immediately:
                 self.build_index()
         else:
-            logging.warning(f"尝试删除不存在的内存单元ID '{uid}'。")
+            logging.warning(f"尝试删除不存在的内存单元ID '{uid}'")
 
         # 添加到删除跟踪
         self._deleted_units.add(uid)
@@ -665,13 +726,96 @@ class SemanticMap:
         if uid in self._access_counts:
             del self._access_counts[uid]
 
+    def get_all_units(self) -> List[MemoryUnit]:
+        """获取所有MemoryUnit对象"""
+        return list(self.memory_units.values())
+    
+    # ==============================
+    # 与Hippo保持一致的方法
+    # ==============================
+
+    def get_all_memory_space_names(self) -> List[str]:
+        """
+        获取所有MemorySpace名称（递归，去重）。
+        """
+        result = set()
+
+        def _collect_names(space: MemorySpace):
+            result.add(space.name)
+            for child_space_name in space.get_child_space_names():
+                child_space = self.memory_spaces.get(child_space_name)
+                if child_space:
+                    _collect_names(child_space)
+
+        for space in self.memory_spaces.values():
+            _collect_names(space)
+        return list(result)
+
+    def get_memory_space_structures(self) -> List[dict]:
+        """
+        递归导出所有MemorySpace嵌套结构（树/嵌套dict），
+        每个ms展示：名称、unit uid列表、所有unit的raw_data字段全集、子空间。
+        返回列表，每个元素为一个ms的结构。
+        """
+
+        def _struct(space: MemorySpace):
+            # 收集本space下所有unit的uid和raw_data字段全集
+            unit_uids = list(space.get_unit_uids())
+            unit_fields = set()
+            for uid in unit_uids:
+                unit = self.memory_units.get(uid)
+                if unit:
+                    unit_fields.update(unit.raw_data.keys())
+            
+            # 获取子空间
+            child_space_names = list(space.get_child_space_names())
+            children = []
+            for child_name in child_space_names:
+                child_space = self.memory_spaces.get(child_name)
+                if child_space:
+                    children.append(_struct(child_space))
+            
+            d = {
+                "name": space.name,
+                "unit_uids": unit_uids,
+                "unit_fields": sorted(list(unit_fields)),
+            }
+            if children:
+                d["children"] = children
+            return d
+
+        # 找到根空间（没有被其他空间包含的空间）
+        all_child_names = set()
+        for space in self.memory_spaces.values():
+            all_child_names.update(space.get_child_space_names())
+        
+        root_spaces = [space for space in self.memory_spaces.values() 
+                      if space.name not in all_child_names]
+        
+        return [_struct(space) for space in root_spaces]
+
+    def deduplicate_units(self, units: List[MemoryUnit]) -> List[MemoryUnit]:
+        """去重单元列表"""
+        seen = set()
+        result = []
+        for u in units:
+            if u.uid not in seen:
+                seen.add(u.uid)
+                result.append(u)
+        return result
+
+    # ==============================
+    # FAISS索引构建和搜索（保持原有功能）
+    # ==============================
+
     def build_index(self):
         """
         根据当前所有具有有效嵌入的内存单元构建（或重建）FAISS索引。
         """
         if not self.memory_units:
             logging.info("没有内存单元可用于构建索引。")
-            if self.faiss_index: self.faiss_index.reset() # 清空现有索引
+            if self.faiss_index: 
+                self.faiss_index.reset() # 清空现有索引
             self._uid_to_internal_faiss_id.clear()
             self._internal_faiss_id_counter = 0
             return
@@ -681,8 +825,6 @@ class SemanticMap:
         
         # 重置映射和计数器，因为我们要重建
         self._uid_to_internal_faiss_id.clear()
-        # self._internal_faiss_id_counter = 0 # 如果希望ID在多次重建中保持某种程度的稳定性，则不要重置计数器，除非ID用完。
-                                          # 但对于 IndexIDMap，每次重建时使用新的连续ID可能更简单。
 
         current_internal_id = 0
         for uid, unit in self.memory_units.items():
@@ -697,7 +839,8 @@ class SemanticMap:
 
         if not valid_embeddings:
             logging.info("没有有效的嵌入可用于构建FAISS索引。")
-            if self.faiss_index: self.faiss_index.reset()
+            if self.faiss_index: 
+                self.faiss_index.reset()
             return
 
         embeddings_np = np.array(valid_embeddings).astype(np.float32)
@@ -712,8 +855,7 @@ class SemanticMap:
         # 如果索引类型需要训练 (例如 IVF 系列)
         if "IVF" in self.faiss_index_type and not self.faiss_index.is_trained:
             logging.info(f"正在训练FAISS索引 ('{self.faiss_index_type}')...")
-            # 确保训练数据至少有一定数量的向量，具体取决于 nlist
-            if embeddings_np.shape[0] < getattr(self.faiss_index, 'nlist', 1): # 简单检查
+            if embeddings_np.shape[0] < getattr(self.faiss_index, 'nlist', 1):
                  logging.warning(f"训练数据太少 ({embeddings_np.shape[0]} 个向量) 对于 IVF 索引。可能导致错误或性能不佳。")
             if embeddings_np.shape[0] > 0 :
                 self.faiss_index.train(embeddings_np)
@@ -722,12 +864,10 @@ class SemanticMap:
                 logging.error("没有数据用于训练FAISS索引。")
                 return
 
-
         self.faiss_index.add_with_ids(embeddings_np, ids_np)
         logging.info(f"FAISS索引已成功构建/重建。包含 {self.faiss_index.ntotal} 个向量。")
-        # 更新内部ID计数器，以防将来增量添加（尽管当前build_index是完全重建）
+        # 更新内部ID计数器
         self._internal_faiss_id_counter = current_internal_id
-
 
     def search_similarity_by_embedding(self,
                                 query_embedding: np.ndarray,
@@ -736,15 +876,6 @@ class SemanticMap:
                                 filter_uids: Optional[Set[str]] = None) -> List[Tuple[MemoryUnit, float]]:
         """
         通过查询向量在语义地图中搜索相似的内存单元。
-        参数:
-            query_embedding (np.ndarray): 用于查询的嵌入向量。
-            k (int): 要返回的最相似单元的数量。
-            space_name (Optional[str]): 如果提供，则仅在指定的内存空间内搜索。
-            filter_uids (Optional[Set[str]]): 一个可选的单元ID集合，用于进一步限制搜索范围（仅搜索这些ID对应的单元）。
-                                                如果同时提供了 space_name 和 filter_uids，则取它们的交集。
-        返回:
-            List[Tuple[MemoryUnit, float]]: 一个元组列表，每个元组包含 (相似的MemoryUnit, 相似度得分/距离)。
-                                            列表按相似度降序排列 (距离越小越相似)。
         """
         if self.faiss_index is None or self.faiss_index.ntotal == 0:
             logging.warning("FAISS索引未构建或为空。无法执行搜索。")
@@ -763,12 +894,11 @@ class SemanticMap:
         if space_name:
             space = self.get_memory_space(space_name)
             if space:
-                candidate_uids = space.get_memory_uids().copy() # 获取副本
+                candidate_uids = space.get_unit_uids().copy()
             else:
                 logging.warning(f"内存空间 '{space_name}' 未找到。将执行全局搜索或基于 filter_uids 的搜索。")
-                # 如果空间不存在，则不应返回任何结果，除非filter_uids也为空
-                if not filter_uids: return []
-
+                if not filter_uids: 
+                    return []
 
         if filter_uids:
             if candidate_uids is not None:
@@ -789,18 +919,27 @@ class SemanticMap:
                 return []
 
             final_target_internal_ids_np = np.array(target_internal_faiss_ids, dtype=np.int64)
-            id_selector = faiss.IDSelectorArray(final_target_internal_ids_np)
-            search_params = faiss.SearchParametersIVF() if "IVF" in self.faiss_index_type else faiss.SearchParameters()
-            search_params.sel = id_selector
+            try:
+                import faiss
+                id_selector = faiss.IDSelectorArray(final_target_internal_ids_np)
+                search_params = faiss.SearchParametersIVF() if "IVF" in self.faiss_index_type else faiss.SearchParameters()
+                search_params.sel = id_selector
+            except:
+                logging.warning("FAISS版本不支持搜索参数，将执行不带过滤器的搜索")
+                search_params = None
+            
             # 调整k值，使其不超过候选集大小
             k = min(k, len(final_target_internal_ids_np))
 
-
-        if k == 0: return [] # 如果有效k为0，则不搜索
+        if k == 0: 
+            return [] # 如果有效k为0，则不搜索
 
         try:
             # 尝试使用搜索参数
-            distances, internal_faiss_indices = self.faiss_index.search(query_embedding_np, k, params=search_params)
+            if search_params:
+                distances, internal_faiss_indices = self.faiss_index.search(query_embedding_np, k, params=search_params)
+            else:
+                distances, internal_faiss_indices = self.faiss_index.search(query_embedding_np, k)
         except RuntimeError as e:
             if "search params not supported for this index" in str(e):
                 # 索引不支持搜索参数，使用不带参数的搜索
@@ -814,7 +953,6 @@ class SemanticMap:
         
         results: List[Tuple[MemoryUnit, float]] = []
         # 反向映射：从内部FAISS ID找到MemoryUnit ID
-        # 创建一个从 internal_faiss_id 到 uid 的临时反向映射
         internal_id_to_uid_map = {v: k for k, v in self._uid_to_internal_faiss_id.items()}
 
         for i in range(internal_faiss_indices.shape[1]):
@@ -827,7 +965,7 @@ class SemanticMap:
                 unit = self.get_unit(uid)
                 if unit:
                     results.append((unit, float(distances[0, i])))
-                else: # 理论上不应发生，因为internal_id应该有效
+                else:
                     logging.warning(f"在FAISS搜索结果中找到内部ID {internal_id}，但在内存单元字典中找不到对应的单元ID '{uid}'。")
             else:
                 logging.warning(f"在FAISS搜索结果中找到无法映射回单元ID的内部ID {internal_id}。")
@@ -848,45 +986,17 @@ class SemanticMap:
             return []
         return self.search_similarity_by_embedding(query_embedding, k, space_name, filter_uids)
 
-    # --- MemorySpace 管理方法 ---
-    def create_memory_space(self, space_name: str) -> MemorySpace:
-        """创建或获取一个内存空间。"""
-        if space_name not in self.memory_spaces:
-            self.memory_spaces[space_name] = MemorySpace(name=space_name)
-            logging.info(f"内存空间 '{space_name}' 已创建。")
-        return self.memory_spaces[space_name]
+    # ==============================
+    # 持久化方法（更新兼容性）
+    # ==============================
 
-    def get_memory_space(self, space_name: str) -> Optional[MemorySpace]:
-        """通过名称获取内存空间。"""
-        return self.memory_spaces.get(space_name)
-
-    def add_unit_to_space(self, uid: str, space_name: str):
-        """将一个内存单元添加到一个内存空间。"""
-        if uid not in self.memory_units:
-            logging.warning(f"尝试将不存在的内存单元 '{uid}' 添加到空间 '{space_name}'。")
-            return
-        space = self.create_memory_space(space_name) # 如果空间不存在则创建
-        space.add_unit(uid)
-
-    def remove_unit_from_space(self, uid: str, space_name: str):
-        """从一个内存空间移除一个内存单元。"""
-        space = self.get_memory_space(space_name)
-        if space:
-            space.remove_unit(uid)
-        else:
-            logging.warning(f"尝试从不存在的内存空间 '{space_name}' 移除单元 '{uid}'。")
-
-    # --- 持久化 ---
     def save_map(self, directory_path: str):
         """
         将 SemanticMap 的状态保存到指定目录。
-        会保存 memory_units, memory_spaces, FAISS 索引, 以及 _uid_to_internal_faiss_id 映射。
-        参数:
-            directory_path (str): 用于保存文件的目录路径。如果不存在，将尝试创建。
         """
         os.makedirs(directory_path, exist_ok=True)
         
-        # 1. 保存 MemoryUnit 和 MemorySpace 对象 (使用 pickle)
+        # 1. 保存 MemoryUnit 和 MemorySpace 对象
         with open(os.path.join(directory_path, "semantic_map_data.pkl"), "wb") as f:
             pickle.dump({
                 "memory_units": self.memory_units,
@@ -899,22 +1009,17 @@ class SemanticMap:
         
         # 2. 保存 FAISS 索引
         if self.faiss_index:
+            import faiss
             faiss.write_index(self.faiss_index, os.path.join(directory_path, "semantic_map.faissindex"))
         
         logging.info(f"SemanticMap 已保存到目录: '{directory_path}'")
 
     @classmethod
     def load_map(cls, directory_path: str,
-                 image_embedding_model_name: Optional[str] = None, # 加载时可以覆盖模型名称
+                 image_embedding_model_name: Optional[str] = None,
                  text_embedding_model_name: Optional[str] = None) -> 'SemanticMap':
         """
         从指定目录加载 SemanticMap 的状态。
-        参数:
-            directory_path (str): 从中加载文件的目录路径。
-            image_embedding_model_name (Optional[str]): 可选，用于覆盖保存的图像模型名称。
-            text_embedding_model_name (Optional[str]): 可选，用于覆盖保存的文本模型名称。
-        返回:
-            SemanticMap: 加载的 SemanticMap 实例。
         """
         data_file = os.path.join(directory_path, "semantic_map_data.pkl")
         index_file = os.path.join(directory_path, "semantic_map.faissindex")
@@ -926,47 +1031,52 @@ class SemanticMap:
             saved_state = pickle.load(f)
 
         # 使用保存的参数或加载时提供的参数初始化实例
-        img_model = image_embedding_model_name if image_embedding_model_name else "clip-ViT-B-32" # 默认值
-        txt_model = text_embedding_model_name if text_embedding_model_name else "sentence-transformers/clip-ViT-B-32-multilingual-v1" # 默认值
+        img_model = image_embedding_model_name if image_embedding_model_name else "clip-ViT-B-32"
+        txt_model = text_embedding_model_name if text_embedding_model_name else "sentence-transformers/clip-ViT-B-32-multilingual-v1"
         
-        # 从保存的状态中获取参数，如果存在的话
         embedding_dim = saved_state.get("embedding_dim", 512)
-        faiss_index_type = saved_state.get("faiss_index_type", "IDMap,Flat") # 确保有默认值
-
-        # 如果加载时提供了模型名称，则使用它们
-        # (注意：如果模型名称与保存时的不一致，嵌入维度也可能需要调整，这里简化处理)
-        # 实际应用中，模型和维度应保持一致或有兼容性策略
+        faiss_index_type = saved_state.get("faiss_index_type", "IDMap,Flat")
 
         instance = cls(
-            image_embedding_model_name=img_model, # 实际使用时应确保与保存时一致或兼容
-            text_embedding_model_name=txt_model,  # 同上
+            image_embedding_model_name=img_model,
+            text_embedding_model_name=txt_model,
             embedding_dim=embedding_dim,
             faiss_index_type=faiss_index_type
         )
         
         instance.memory_units = saved_state["memory_units"]
         instance.memory_spaces = saved_state["memory_spaces"]
+        
+        # 重新设置所有MemorySpace的SemanticMap引用
+        for space_name, space in instance.memory_spaces.items():
+            space._set_semantic_map_ref(instance)
+        
         instance._uid_to_internal_faiss_id = saved_state.get("_uid_to_internal_faiss_id", {})
         instance._internal_faiss_id_counter = saved_state.get("_internal_faiss_id_counter", 0)
 
+        # 加载FAISS索引
         if os.path.exists(index_file):
             try:
+                import faiss
                 instance.faiss_index = faiss.read_index(index_file)
-                logging.info(f"FAISS 索引已从 '{index_file}' 加载。包含 {instance.faiss_index.ntotal} 个向量。")
-                # 验证维度
-                if instance.faiss_index.d != instance.embedding_dim:
-                    logging.warning(f"加载的FAISS索引维度 ({instance.faiss_index.d}) 与 SemanticMap 期望维度 ({instance.embedding_dim}) 不符。可能需要重建索引。")
+                logging.info(f"FAISS 索引已从 '{index_file}' 加载，包含 {instance.faiss_index.ntotal} 个向量")
             except Exception as e:
-                logging.error(f"加载 FAISS 索引失败: {e}。索引将为空，可能需要重建。")
-                instance.faiss_index = None # 确保失败时索引为空
-                instance._init_faiss_index() # 尝试重新初始化一个空索引结构
+                logging.error(f"加载 FAISS 索引失败: {e}")
+                instance.faiss_index = None
+                instance._init_faiss_index()
         else:
-            logging.warning(f"FAISS 索引文件 '{index_file}' 未找到。索引将为空，需要重建。")
-            instance._init_faiss_index() # 初始化一个空索引结构
+            logging.warning(f"FAISS 索引文件 '{index_file}' 未找到")
+            instance._init_faiss_index()
             
-        logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载。")
+        logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载")
         return instance
     
+    
+
+    # ==============================
+    # 兼容旧接口的方法
+    # ==============================
+
     def export_to_milvus(
         self, 
         host: str = "localhost", 
@@ -977,20 +1087,8 @@ class SemanticMap:
     ) -> bool:
         """
         将SemanticMap中的内存单元导出到Milvus数据库
-
         注意：此方法已废弃，推荐使用 sync_to_external() 方法
-        
-        参数:
-            host: Milvus服务器地址
-            port: Milvus服务器端口
-            user: 用户名（如果需要认证）
-            password: 密码（如果需要认证）
-            collection_name: 集合名称
-        
-        返回:
-            导出是否成功
         """
-    
         logging.warning("export_to_milvus() 方法已废弃，推荐使用 sync_to_external() 方法")
 
         try:
@@ -1019,7 +1117,7 @@ class SemanticMap:
                 # 查找单元所属的所有空间
                 space_names = []
                 for space_name, space in self.memory_spaces.items():
-                    if uid in space.get_memory_uids():
+                    if space.contains_unit(uid):
                         space_names.append(space_name)
                 
                 # 添加到Milvus
