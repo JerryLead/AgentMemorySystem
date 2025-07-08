@@ -23,7 +23,7 @@ import numpy as np
 MAX_LENGTH = {
     "gpt-3.5-turbo-16k-0613": 16385,
     "gpt-4o-mini" : 128000,
-    "gpt-4o" : 128000,
+    "gpt-4o" : 128000
 }
 PER_QA_TOKEN_BUDGET = 5000
 

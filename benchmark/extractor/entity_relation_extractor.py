@@ -4,8 +4,6 @@ import re
 from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass
 from benchmark.llm_utils.llm_client import LLMClient
-from dev.memory_unit import MemoryUnit
-from dev.semantic_graph import SemanticGraph
 
 @dataclass
 class Entity:
@@ -723,6 +721,244 @@ class EntityRelationExtractor:
             return [], [], []
         
         return entities, relationships, content_keywords
+
+    def _parse_llm_response_fallback(self, response: str, source_text: str) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """
+        JSON解析失败时的回退解析方法
+        使用正则表达式提取实体和关系信息
+        """
+        entities = []
+        relationships = []
+        content_keywords = []
+        
+        try:
+            logging.info("JSON解析失败，尝试正则表达式解析")
+            
+            # 尝试修复JSON格式
+            fixed_json = self._attempt_json_repair(response)
+            if fixed_json:
+                try:
+                    data = json.loads(fixed_json)
+                    return self._parse_json_data(data, source_text)
+                except:
+                    pass
+            
+            # 如果JSON修复失败，使用正则表达式解析
+            entities = self._extract_entities_with_regex(response, source_text)
+            relationships = self._extract_relationships_with_regex(response, source_text)
+            content_keywords = self._extract_keywords_with_regex(response)
+            
+            logging.info(f"正则表达式解析结果: {len(entities)} 个实体, {len(relationships)} 个关系")
+            
+        except Exception as e:
+            logging.error(f"回退解析也失败: {e}")
+        
+        return entities, relationships, content_keywords
+
+    def _attempt_json_repair(self, response: str) -> str:
+        """
+        尝试修复损坏的JSON
+        """
+        try:
+            # 移除markdown标记
+            cleaned = re.sub(r'```json\s*', '', response)
+            cleaned = re.sub(r'```\s*$', '', cleaned)
+            
+            # 找到JSON主体
+            start = cleaned.find('{')
+            if start == -1:
+                return None
+                
+            # 简单的括号匹配
+            brace_count = 0
+            end = start
+            
+            for i, char in enumerate(cleaned[start:], start):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = i + 1
+                        break
+            
+            if brace_count != 0:
+                # 尝试添加缺失的闭合括号
+                json_str = cleaned[start:] + '}' * brace_count
+            else:
+                json_str = cleaned[start:end]
+            
+            # 尝试修复常见的JSON错误
+            json_str = re.sub(r',\s*}', '}', json_str)  # 移除多余的逗号
+            json_str = re.sub(r',\s*]', ']', json_str)  # 移除数组末尾的逗号
+            json_str = re.sub(r'(\w+):', r'"\1":', json_str)  # 为键添加引号
+            
+            # 验证修复后的JSON
+            json.loads(json_str)
+            return json_str
+            
+        except Exception as e:
+            logging.debug(f"JSON修复失败: {e}")
+            return None
+        
+    def _parse_json_data(self, data: dict, source_text: str) -> Tuple[List[Entity], List[Relationship], List[str]]:
+        """
+        解析JSON数据为实体和关系
+        """
+        entities = []
+        relationships = []
+        content_keywords = []
+        
+        # 解析实体
+        if "entities" in data and isinstance(data["entities"], list):
+            for entity_data in data["entities"]:
+                if isinstance(entity_data, dict):
+                    try:
+                        entity = Entity(
+                            name=str(entity_data.get("name", "")).strip(),
+                            entity_type=self._normalize_entity_type(str(entity_data.get("type", "")).strip()),
+                            description=str(entity_data.get("description", "")).strip(),
+                            source_text=source_text[:200],
+                            confidence=0.8
+                        )
+                        if entity.name and entity.entity_type:
+                            entities.append(entity)
+                    except Exception as e:
+                        logging.warning(f"解析实体失败: {entity_data} - {e}")
+        
+        # 解析关系
+        if "relationships" in data and isinstance(data["relationships"], list):
+            for rel_data in data["relationships"]:
+                if isinstance(rel_data, dict):
+                    try:
+                        relationship = Relationship(
+                            source_entity=str(rel_data.get("source", "")).strip(),
+                            target_entity=str(rel_data.get("target", "")).strip(),
+                            relationship_type=self._normalize_relationship_type(str(rel_data.get("type", "")).strip()),
+                            description=str(rel_data.get("description", "")).strip(),
+                            keywords=[str(rel_data.get("type", "")).lower()],
+                            strength=float(rel_data.get("strength", 0.5)),
+                            source_text=source_text[:200]
+                        )
+                        if relationship.source_entity and relationship.target_entity:
+                            relationships.append(relationship)
+                    except Exception as e:
+                        logging.warning(f"解析关系失败: {rel_data} - {e}")
+        
+        # 解析关键词
+        if "keywords" in data and isinstance(data["keywords"], list):
+            content_keywords = [str(kw).strip() for kw in data["keywords"] if str(kw).strip()]
+        
+        return entities, relationships, content_keywords
+
+    def _extract_entities_with_regex(self, response: str, source_text: str) -> List[Entity]:
+        """
+        使用正则表达式从响应中提取实体
+        """
+        entities = []
+        
+        # 匹配实体模式
+        entity_patterns = [
+            r'"name":\s*"([^"]+)"[^}]*"type":\s*"([^"]+)"[^}]*"description":\s*"([^"]*)"',
+            r'"([^"]+)"\s*:\s*"([^"]+)"\s*,\s*"([^"]*)"',  # 简化格式
+            r'实体[：:]\s*([^\n,，]+)',  # 中文模式
+            r'Entity[：:]\s*([^\n,，]+)',  # 英文模式
+        ]
+        
+        for pattern in entity_patterns:
+            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                try:
+                    if len(match) >= 2:
+                        name = match[0].strip()
+                        entity_type = match[1].strip() if len(match) > 1 else "category"
+                        description = match[2].strip() if len(match) > 2 else ""
+                        
+                        if name:
+                            entity = Entity(
+                                name=name,
+                                entity_type=self._normalize_entity_type(entity_type),
+                                description=description,
+                                source_text=source_text[:200],
+                                confidence=0.6
+                            )
+                            entities.append(entity)
+                except Exception as e:
+                    logging.debug(f"正则表达式提取实体失败: {match} - {e}")
+        
+        return entities
+
+    def _extract_relationships_with_regex(self, response: str, source_text: str) -> List[Relationship]:
+        """
+        使用正则表达式从响应中提取关系
+        """
+        relationships = []
+        
+        # 匹配关系模式
+        relationship_patterns = [
+            r'"source":\s*"([^"]+)"[^}]*"target":\s*"([^"]+)"[^}]*"type":\s*"([^"]+)"',
+            r'([^"]+)\s*->\s*([^"]+)\s*:\s*([^\n,，]+)',  # 简化格式
+            r'关系[：:]\s*([^-]+)\s*-\s*([^：:]+)[：:]\s*([^\n,，]+)',  # 中文模式
+        ]
+        
+        for pattern in relationship_patterns:
+            matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                try:
+                    if len(match) >= 3:
+                        source = match[0].strip()
+                        target = match[1].strip()
+                        rel_type = match[2].strip()
+                        
+                        if source and target:
+                            relationship = Relationship(
+                                source_entity=source,
+                                target_entity=target,
+                                relationship_type=self._normalize_relationship_type(rel_type),
+                                description=f"{source} 与 {target} 的 {rel_type} 关系",
+                                keywords=[rel_type.lower()],
+                                strength=0.6,
+                                source_text=source_text[:200]
+                            )
+                            relationships.append(relationship)
+                except Exception as e:
+                    logging.debug(f"正则表达式提取关系失败: {match} - {e}")
+        
+        return relationships
+
+    def _extract_keywords_with_regex(self, response: str) -> List[str]:
+        """
+        使用正则表达式从响应中提取关键词
+        """
+        keywords = []
+        
+        # 匹配关键词模式
+        keyword_patterns = [
+            r'"keywords":\s*\[(.*?)\]',
+            r'关键词[：:]\s*([^\n]+)',
+            r'Keywords[：:]\s*([^\n]+)',
+        ]
+        
+        for pattern in keyword_patterns:
+            matches = re.findall(pattern, response, re.IGNORECASE | re.DOTALL)
+            for match in matches:
+                try:
+                    # 清理和分割关键词
+                    keyword_str = match.strip()
+                    keyword_str = re.sub(r'["\[\]]', '', keyword_str)
+                    
+                    # 按常见分隔符分割
+                    for separator in [',', '，', ';', '；', '\n']:
+                        if separator in keyword_str:
+                            keywords.extend([kw.strip() for kw in keyword_str.split(separator) if kw.strip()])
+                            break
+                    else:
+                        if keyword_str:
+                            keywords.append(keyword_str)
+                except Exception as e:
+                    logging.debug(f"正则表达式提取关键词失败: {match} - {e}")
+        
+        return list(set(keywords))  # 去重
 
     def _extract_json_from_response(self, response: str) -> str:
         """从LLM响应中提取JSON部分"""

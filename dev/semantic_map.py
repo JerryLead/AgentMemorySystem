@@ -989,6 +989,7 @@ class SemanticMap:
     # ==============================
     # 持久化方法（更新兼容性）
     # ==============================
+    # 修改 dev/semantic_map.py 中的 save_map 方法
 
     def save_map(self, directory_path: str):
         """
@@ -996,28 +997,49 @@ class SemanticMap:
         """
         os.makedirs(directory_path, exist_ok=True)
         
-        # 1. 保存 MemoryUnit 和 MemorySpace 对象
+        # 1. 准备保存数据，排除不可序列化的对象
+        memory_spaces_for_save = {}
+        for space_name, space in self.memory_spaces.items():
+            # 创建一个可序列化的MemorySpace副本
+            space_data = {
+                "name": space.name,
+                "unit_uids": space._unit_uids.copy(),
+                "child_space_names": space._child_space_names.copy()
+                # 不保存 _semantic_map_ref 弱引用
+            }
+            memory_spaces_for_save[space_name] = space_data
+        
+        # 2. 保存 MemoryUnit 和处理过的 MemorySpace 数据
         with open(os.path.join(directory_path, "semantic_map_data.pkl"), "wb") as f:
             pickle.dump({
                 "memory_units": self.memory_units,
-                "memory_spaces": self.memory_spaces,
+                "memory_spaces_data": memory_spaces_for_save,  # 保存处理过的数据
                 "_uid_to_internal_faiss_id": self._uid_to_internal_faiss_id,
                 "_internal_faiss_id_counter": self._internal_faiss_id_counter,
                 "embedding_dim": self.embedding_dim,
-                "faiss_index_type": self.faiss_index_type
+                "faiss_index_type": self.faiss_index_type,
+                # 保存其他状态
+                "_modified_units": list(self._modified_units),
+                "_deleted_units": list(self._deleted_units),
+                "_last_sync_time": self._last_sync_time.isoformat() if self._last_sync_time else None,
+                "_max_memory_units": self._max_memory_units,
+                "_access_counts": self._access_counts.copy()
             }, f)
         
-        # 2. 保存 FAISS 索引
+        # 3. 保存 FAISS 索引
         if self.faiss_index:
-            import faiss
-            faiss.write_index(self.faiss_index, os.path.join(directory_path, "semantic_map.faissindex"))
+            try:
+                import faiss
+                faiss.write_index(self.faiss_index, os.path.join(directory_path, "semantic_map.faissindex"))
+            except Exception as e:
+                logging.warning(f"保存FAISS索引失败: {e}")
         
         logging.info(f"SemanticMap 已保存到目录: '{directory_path}'")
 
     @classmethod
     def load_map(cls, directory_path: str,
-                 image_embedding_model_name: Optional[str] = None,
-                 text_embedding_model_name: Optional[str] = None) -> 'SemanticMap':
+                image_embedding_model_name: Optional[str] = None,
+                text_embedding_model_name: Optional[str] = None) -> 'SemanticMap':
         """
         从指定目录加载 SemanticMap 的状态。
         """
@@ -1044,15 +1066,44 @@ class SemanticMap:
             faiss_index_type=faiss_index_type
         )
         
+        # 恢复数据
         instance.memory_units = saved_state["memory_units"]
-        instance.memory_spaces = saved_state["memory_spaces"]
         
-        # 重新设置所有MemorySpace的SemanticMap引用
-        for space_name, space in instance.memory_spaces.items():
+        # 重建 MemorySpace 对象
+        memory_spaces_data = saved_state.get("memory_spaces_data", saved_state.get("memory_spaces", {}))
+        instance.memory_spaces = {}
+        
+        for space_name, space_data in memory_spaces_data.items():
+            if isinstance(space_data, dict):
+                # 新格式：从字典数据重建MemorySpace
+                space = MemorySpace(space_data["name"])
+                space._unit_uids = space_data.get("unit_uids", set())
+                space._child_space_names = space_data.get("child_space_names", set())
+            else:
+                # 旧格式：直接使用MemorySpace对象
+                space = space_data
+            
+            # 设置SemanticMap引用
             space._set_semantic_map_ref(instance)
+            instance.memory_spaces[space_name] = space
         
+        # 恢复其他状态
         instance._uid_to_internal_faiss_id = saved_state.get("_uid_to_internal_faiss_id", {})
         instance._internal_faiss_id_counter = saved_state.get("_internal_faiss_id_counter", 0)
+        instance._modified_units = set(saved_state.get("_modified_units", []))
+        instance._deleted_units = set(saved_state.get("_deleted_units", []))
+        instance._max_memory_units = saved_state.get("_max_memory_units", 10000)
+        instance._access_counts = saved_state.get("_access_counts", {})
+        
+        # 恢复时间戳
+        last_sync_time_str = saved_state.get("_last_sync_time")
+        if last_sync_time_str:
+            try:
+                from datetime import datetime
+                instance._last_sync_time = datetime.fromisoformat(last_sync_time_str)
+            except Exception as e:
+                logging.warning(f"恢复同步时间戳失败: {e}")
+                instance._last_sync_time = None
 
         # 加载FAISS索引
         if os.path.exists(index_file):
@@ -1070,6 +1121,88 @@ class SemanticMap:
             
         logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载")
         return instance
+    
+
+    # def save_map(self, directory_path: str):
+    #     """
+    #     将 SemanticMap 的状态保存到指定目录。
+    #     """
+    #     os.makedirs(directory_path, exist_ok=True)
+        
+    #     # 1. 保存 MemoryUnit 和 MemorySpace 对象
+    #     with open(os.path.join(directory_path, "semantic_map_data.pkl"), "wb") as f:
+    #         pickle.dump({
+    #             "memory_units": self.memory_units,
+    #             "memory_spaces": self.memory_spaces,
+    #             "_uid_to_internal_faiss_id": self._uid_to_internal_faiss_id,
+    #             "_internal_faiss_id_counter": self._internal_faiss_id_counter,
+    #             "embedding_dim": self.embedding_dim,
+    #             "faiss_index_type": self.faiss_index_type
+    #         }, f)
+        
+    #     # 2. 保存 FAISS 索引
+    #     if self.faiss_index:
+    #         import faiss
+    #         faiss.write_index(self.faiss_index, os.path.join(directory_path, "semantic_map.faissindex"))
+        
+    #     logging.info(f"SemanticMap 已保存到目录: '{directory_path}'")
+
+    # @classmethod
+    # def load_map(cls, directory_path: str,
+    #              image_embedding_model_name: Optional[str] = None,
+    #              text_embedding_model_name: Optional[str] = None) -> 'SemanticMap':
+    #     """
+    #     从指定目录加载 SemanticMap 的状态。
+    #     """
+    #     data_file = os.path.join(directory_path, "semantic_map_data.pkl")
+    #     index_file = os.path.join(directory_path, "semantic_map.faissindex")
+
+    #     if not os.path.exists(data_file):
+    #         raise FileNotFoundError(f"SemanticMap 数据文件未找到: {data_file}")
+
+    #     with open(data_file, "rb") as f:
+    #         saved_state = pickle.load(f)
+
+    #     # 使用保存的参数或加载时提供的参数初始化实例
+    #     img_model = image_embedding_model_name if image_embedding_model_name else "clip-ViT-B-32"
+    #     txt_model = text_embedding_model_name if text_embedding_model_name else "sentence-transformers/clip-ViT-B-32-multilingual-v1"
+        
+    #     embedding_dim = saved_state.get("embedding_dim", 512)
+    #     faiss_index_type = saved_state.get("faiss_index_type", "IDMap,Flat")
+
+    #     instance = cls(
+    #         image_embedding_model_name=img_model,
+    #         text_embedding_model_name=txt_model,
+    #         embedding_dim=embedding_dim,
+    #         faiss_index_type=faiss_index_type
+    #     )
+        
+    #     instance.memory_units = saved_state["memory_units"]
+    #     instance.memory_spaces = saved_state["memory_spaces"]
+        
+    #     # 重新设置所有MemorySpace的SemanticMap引用
+    #     for space_name, space in instance.memory_spaces.items():
+    #         space._set_semantic_map_ref(instance)
+        
+    #     instance._uid_to_internal_faiss_id = saved_state.get("_uid_to_internal_faiss_id", {})
+    #     instance._internal_faiss_id_counter = saved_state.get("_internal_faiss_id_counter", 0)
+
+    #     # 加载FAISS索引
+    #     if os.path.exists(index_file):
+    #         try:
+    #             import faiss
+    #             instance.faiss_index = faiss.read_index(index_file)
+    #             logging.info(f"FAISS 索引已从 '{index_file}' 加载，包含 {instance.faiss_index.ntotal} 个向量")
+    #         except Exception as e:
+    #             logging.error(f"加载 FAISS 索引失败: {e}")
+    #             instance.faiss_index = None
+    #             instance._init_faiss_index()
+    #     else:
+    #         logging.warning(f"FAISS 索引文件 '{index_file}' 未找到")
+    #         instance._init_faiss_index()
+            
+    #     logging.info(f"SemanticMap 已从目录 '{directory_path}' 加载")
+    #     return instance
     
     
 
