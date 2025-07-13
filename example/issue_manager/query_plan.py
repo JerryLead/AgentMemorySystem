@@ -10,49 +10,42 @@ class IssueManagerQueryPlanner(QueryPlanner):
   "plan": [
     {
       "step": 1,
-      "operation": "filter_memory_units",
+      "operation": "search_similarity_in_graph",
       "parameters": {
-        "filter_condition": {
-          "uid": {"eq": "github_issue_1968"}
-        },
-        "ms_names": ["github_issues"]
-      },
-      "result_var": "target_issue"
-    },
-    {
-      "step": 2,
-      "operation": "get_implicit_neighbors",
-      "parameters": {
-        "uid": "$target_issue.uid",
-        "top_k": 10,
-        "ms_names": ["github_issues"]
+        "query_text": "Issue#1968",
+        "top_k": 5,
+        "ms_names": ["github_issues"],
+        "recursive": true
       },
       "result_var": "similar_issues"
     },
     {
-      "step": 3,
+      "step": 2,
       "operation": "get_explicit_neighbors",
       "parameters": {
         "uids": "$similar_issues.uid",
         "rel_type": "corresponding_pr",
-        "direction": "all",
-        "ms_names": ["github_prs"]
+        "ms_names": ["github_issues", "github_prs"],
+        "direction": "successors",
+        "recursive": true
       },
       "result_var": "related_prs"
     },
     {
-      "step": 4,
+      "step": 3,
       "operation": "filter_memory_units",
       "parameters": {
         "candidate_units": "$related_prs",
         "filter_condition": {
-          "state": {"in": ["closed", "merged"]}
+          "state": {
+            "in": ["closed", "merged"]
+          }
         }
       },
       "result_var": "closed_prs"
     },
     {
-      "step": 5,
+      "step": 4,
       "operation": "deduplicate_units",
       "parameters": {
         "units": "$closed_prs"
@@ -66,17 +59,12 @@ class IssueManagerQueryPlanner(QueryPlanner):
 
 
 if __name__ == "__main__":
-    sgraph, ms_root = SemanticGraph.load_graph("data/issue_manager")
-
-    sgraph.memory_spaces = [
-        ms_root._members["github_issues"],
-        ms_root._members["github_prs"],
-        ms_root._members["github_code_files"],
-        ms_root._members["github_contributors"],
-        ms_root._members["github_commits"],
-        ms_root._members["github_reviews"],
-        ms_root._members["github_comments"],
-    ]
+    sgraph = SemanticGraph.load_graph(
+        "data/issue_manager",
+        image_embedding_model_name="/mnt/data1/home/guozy/gzy/models/clip-ViT-B-32",
+        text_embedding_model_name="/mnt/data1/home/guozy/gzy/models/clip-ViT-B-32-multilingual-v1",
+    )
+    sgraph.build_semantic_map_index()
 
     planner = IssueManagerQueryPlanner(sgraph)
 
@@ -93,7 +81,8 @@ if __name__ == "__main__":
     """
 
     # 可选：打印生成的prompt
-    # print(planner._generate_prompt(natural_language_query))
+    print(planner._generate_prompt(natural_language_query))
+    exit(0)
     plan = planner.generate_query_plan(natural_language_query)
 
     if plan:
@@ -103,3 +92,5 @@ if __name__ == "__main__":
             print(r.__repr__())
     else:
         print("Failed to parse the query.")
+
+# python -m example.issue_manager.query_plan

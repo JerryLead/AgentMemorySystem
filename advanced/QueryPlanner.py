@@ -104,10 +104,10 @@ MemoryUnit之间存在两种连接方式：
      - `recursive` (bool): 是否递归包含子ms，默认为True
    - 返回：过滤后的记忆单元列表
 
-4. **get_implicit_neighbors(uid, top_k=5, ms_names=None, recursive=True)**
-   - 功能：获取指定记忆单元的隐式关系邻居节点，可限定ms范围。
+4. **get_implicit_neighbors(uids, top_k=5, ms_names=None, recursive=True)**
+   - 功能：获取指定记忆单元（可为多个起点）的隐式关系邻居节点，可限定ms范围。
    - 参数：
-     - uid: 记忆单元ID
+     - uids: 记忆单元ID列表（支持多个起点）
      - top_k: 返回的邻居数量，默认为5
      - ms_names: 指定记忆空间名称列表，若不指定则在全图范围内查找
      - recursive: 是否递归包含子ms，默认为True
@@ -132,34 +132,33 @@ MemoryUnit之间存在两种连接方式：
      - memory_units: 记忆单元列表
    - 返回：聚合结果，记忆单元出现频率
 
+8. **units_union(*args)**
+   - 功能：支持多个MemorySpace、MemoryUnit列表、UID列表的并集，返回去重后的MemoryUnit列表
+   - 参数：
+     - *args: 支持多种类型的参数：
+       - MemoryUnit对象
+       - UID字符串（单个或列表）
+       - MemorySpace对象
+       - MemoryUnit列表
+       - 上述类型的混合列表/元组/集合
+   - 返回：去重后的MemoryUnit列表
+
+9. **units_intersection(*args)**
+   - 功能：支持多个MemorySpace、MemoryUnit列表、UID列表的交集，返回去重后的MemoryUnit列表
+   - 参数：
+     - *args: 支持多种类型的参数（同units_union）
+   - 返回：去重后的MemoryUnit列表（取第一个参数的unit对象）
+
+10. **units_difference(arg1, arg2)**
+    - 功能：返回arg1中有而arg2中没有的unit（按uid），支持MemorySpace、MemoryUnit列表、UID列表
+    - 参数：
+      - arg1: 第一个参数，支持多种类型（同units_union）
+      - arg2: 第二个参数，支持多种类型（同units_union）
+    - 返回：arg1中有而arg2中没有的MemoryUnit列表
+
 ## 查询计划格式与变量引用规则
 
 查询计划采用JSON格式，支持步骤间的变量引用机制：
-
-### 基本格式
-```json
-{{
-  "plan": [
-    {{
-      "step": 1,
-      "operation": "API调用名称",
-      "parameters": {{
-        "参数名1": "参数值1",
-        "参数名2": "参数值2"
-      }},
-      "result_var": "存储结果的变量名"
-    }},
-    {{
-      "step": 2,
-      "operation": "API调用名称",
-      "parameters": {{
-        "参数名": "参数值或变量引用"
-      }},
-      "result_var": "存储结果的变量名"
-    }}
-  ]
-}}
-```
 
 ### 变量引用规则
 - 使用 `$变量名` 引用之前步骤的完整结果
@@ -167,7 +166,7 @@ MemoryUnit之间存在两种连接方式：
 - 支持嵌套属性访问：`$变量名.属性1.属性2`
 - 支持跨ms、合并多个ms结果
 
-### 变量引用示例
+### 格式示例
 ```json
 {{
   "plan": [
@@ -219,8 +218,8 @@ MemoryUnit之间存在两种连接方式：
 """
         return prompt
 
-    def query_llm(self, query):
-        prompt = self._generate_prompt(query)
+    def query_llm(self, prompt):
+        prompt = self._generate_prompt(prompt)
 
         response = requests.post(
             "http://localhost:11434/api/generate",
@@ -302,7 +301,7 @@ MemoryUnit之间存在两种连接方式：
         temp_results = {}
         for step in plan:
             oper = step.get("operation", None)
-            params: Dict[str, str] | None = step.get("parameters", None)
+            params: Dict[str, Any] | None = step.get("parameters", None)
             res = step.get("result_var", None)
 
             # 递归解析参数中的变量
@@ -323,9 +322,15 @@ MemoryUnit之间存在两种连接方式：
             )
 
             if hasattr(self.semantic_graph, oper):
-                temp_results[res] = getattr(self.semantic_graph, oper)(
-                    **processed_params
-                )
+                # 确保 processed_params 是字典类型
+                if isinstance(processed_params, dict):
+                    temp_results[res] = getattr(self.semantic_graph, oper)(
+                        **processed_params
+                    )
+                else:
+                    temp_results[res] = getattr(self.semantic_graph, oper)(
+                        processed_params
+                    )
             else:
                 raise ValueError(f"Operation {oper} not found in SemanticGraph.")
 
