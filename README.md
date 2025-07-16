@@ -257,12 +257,6 @@ AcademicSemanticGraph
   cd ./example/academic_group_meeting/front_end
   streamlit run front_end.py
 
-#### demo pictures
-
-![alt text](images/demo.png)
-
-![alt text](images/attachment.png)
-
 
 ### 3. [Arxiv Paper Intelligent Q&A System](example/arxiv_QA_system)
 
