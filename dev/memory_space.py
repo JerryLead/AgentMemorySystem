@@ -2,6 +2,7 @@ import logging
 import pickle
 from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import numpy as np
+import faiss
 from .memory_unit import MemoryUnit
 
 class MemorySpace:
@@ -327,12 +328,13 @@ class MemorySpace:
     # 索引和搜索功能
     # ===============================
 
-    # TODO: MemorySpace的索引构建应该也可以支持自定义索引类型，可以和所属SemanticMap的索引类型相同，也可以由参数主动指定。
+    # TODO:有改动，建议同步到Hippo
     def build_index(self, embedding_dim: int = 512, min_unit_threshold: int = 100):
         """
         递归收集所有unit并构建局部faiss索引。
         如果内部unit数量小于阈值（如100），则不建立索引。
         支持自定义faiss_index_type。
+        修复IndexIDMap的add_with_ids问题。
         """
         try:
             semantic_map = self._get_semantic_map()
@@ -345,82 +347,256 @@ class MemorySpace:
                 )
                 return
 
-            import faiss
-
             # 优先用自身的faiss_index_type，否则继承父级SemanticMap，否则用默认
             faiss_index_type = (
                 self._faiss_index_type
                 or getattr(semantic_map, "faiss_index_type", None)
                 or "IDMap,Flat"
             )
-            self._emb_index = faiss.index_factory(embedding_dim, faiss_index_type)
+            
+            # 初始化FAISS索引
+            if faiss_index_type.startswith("IDMap,"):
+                # 对于IDMap类型，需要特殊处理
+                base_index_type = faiss_index_type.split("IDMap,", 1)[1]
+                base_index = faiss.index_factory(embedding_dim, base_index_type)
+                self._emb_index = faiss.IndexIDMap(base_index)
+            else:
+                self._emb_index = faiss.index_factory(embedding_dim, faiss_index_type)
+            
             self._index_to_uid = {}
             embeddings = []
+            ids = []  # 用于IndexIDMap
             count = 0
+            
             for unit in units:
-                if unit.embedding is not None:
+                if unit.embedding is not None and unit.embedding.shape[0] == embedding_dim:
                     embeddings.append(unit.embedding)
                     self._index_to_uid[count] = unit.uid
+                    ids.append(count)  # 使用计数作为ID
                     count += 1
+            
             if not embeddings:
                 logging.warning(
                     f"MemorySpace '{self.name}' 没有有效的embeddings来构建索引"
                 )
                 return
-            self._emb_index.add(np.array(embeddings, dtype=np.float32))
+            
+            embeddings_np = np.array(embeddings, dtype=np.float32)
+            
+            # 根据索引类型选择添加方法
+            if faiss_index_type.startswith("IDMap,"):
+                # IndexIDMap类型必须使用add_with_ids
+                ids_np = np.array(ids, dtype=np.int64)
+                
+                # 检查是否需要训练
+                if hasattr(self._emb_index, 'is_trained') and not self._emb_index.is_trained:
+                    if "IVF" in faiss_index_type:
+                        logging.info(f"训练MemorySpace '{self.name}' 的索引...")
+                        self._emb_index.train(embeddings_np)
+                
+                self._emb_index.add_with_ids(embeddings_np, ids_np)
+            else:
+                # 普通索引类型使用add
+                if hasattr(self._emb_index, 'is_trained') and not self._emb_index.is_trained:
+                    if "IVF" in faiss_index_type:
+                        logging.info(f"训练MemorySpace '{self.name}' 的索引...")
+                        self._emb_index.train(embeddings_np)
+                
+                self._emb_index.add(embeddings_np)
+            
             logging.info(
                 f"MemorySpace '{self.name}' 索引构建完成，包含 {count} 个向量 (faiss_index_type={faiss_index_type})"
             )
+            
         except ImportError:
             logging.error("FAISS不可用，无法构建本地索引")
         except Exception as e:
             logging.error(f"构建索引时出错: {e}")
+            # 提供更详细的错误信息
+            import traceback
+            logging.debug(f"详细错误信息: {traceback.format_exc()}")
 
     def search_similarity_units_by_vector(
         self, query_vector: np.ndarray, top_k: int = 5
     ) -> List[Tuple["MemoryUnit", float]]:
         """
         在局部索引中搜索相似单元。如果没有索引则暴力搜索。
+        修复IndexIDMap的搜索逻辑。
         """
         semantic_map = self._get_semantic_map()
+        
         # 优先用索引
         if self._emb_index and getattr(self._emb_index, "ntotal", 0) > 0:
             try:
                 query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
-                D, I = self._emb_index.search(query_vector_np, top_k)
-                results = []
-                for i in range(len(I[0])):
-                    idx = int(I[0][i])
-                    if I[0][i] == -1:
-                        continue
-                    uid = self._index_to_uid.get(idx)
-                    if uid:
-                        unit = semantic_map.memory_units.get(uid)
-                        if unit:
-                            results.append((unit, float(D[0][i])))
-                        else:
-                            logging.warning(
-                                f"索引中的UID '{uid}' 在SemanticMap中不存在"
-                            )
-                return results
+                
+                # 检查索引类型
+                faiss_index_type = (
+                    self._faiss_index_type
+                    or getattr(semantic_map, "faiss_index_type", None)
+                    or "IDMap,Flat"
+                )
+                
+                if faiss_index_type.startswith("IDMap,"):
+                    # IndexIDMap返回的是实际的ID，不是索引位置
+                    D, I = self._emb_index.search(query_vector_np, top_k)
+                    results = []
+                    for i in range(len(I[0])):
+                        internal_id = int(I[0][i])
+                        if I[0][i] == -1:
+                            continue
+                        uid = self._index_to_uid.get(internal_id)
+                        if uid:
+                            unit = semantic_map.memory_units.get(uid)
+                            if unit:
+                                results.append((unit, float(D[0][i])))
+                            else:
+                                logging.warning(
+                                    f"索引中的UID '{uid}' 在SemanticMap中不存在"
+                                )
+                    return results
+                else:
+                    # 普通索引返回的是索引位置
+                    D, I = self._emb_index.search(query_vector_np, top_k)
+                    results = []
+                    for i in range(len(I[0])):
+                        idx = int(I[0][i])
+                        if I[0][i] == -1:
+                            continue
+                        uid = self._index_to_uid.get(idx)
+                        if uid:
+                            unit = semantic_map.memory_units.get(uid)
+                            if unit:
+                                results.append((unit, float(D[0][i])))
+                            else:
+                                logging.warning(
+                                    f"索引中的UID '{uid}' 在SemanticMap中不存在"
+                                )
+                    return results
+                    
             except Exception as e:
                 logging.error(f"索引搜索出错: {e}")
                 # 回退暴力搜索
+                
         # 暴力搜索
         units = self.get_all_units()
         if not units:
             return []
+        
         sims = []
         for u in units:
             if u.embedding is not None:
-                a = query_vector.astype(np.float32)
-                b = u.embedding.astype(np.float32)
-                sim = float(
-                    np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
-                )
-                sims.append((u, sim))
-        sims.sort(key=lambda x: x[1], reverse=True)
+                try:
+                    a = query_vector.astype(np.float32)
+                    b = u.embedding.astype(np.float32)
+                    # 使用余弦相似度，但返回距离（越小越相似）
+                    cosine_sim = float(
+                        np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+                    )
+                    # 转换为距离（1 - 相似度）
+                    distance = 1.0 - cosine_sim
+                    sims.append((u, distance))
+                except Exception as e:
+                    logging.warning(f"计算相似度时出错: {e}")
+                    continue
+        
+        # 按距离排序（越小越相似）
+        sims.sort(key=lambda x: x[1])
         return sims[:top_k]
+
+    # def build_index(self, embedding_dim: int = 512, min_unit_threshold: int = 100):
+    #     """
+    #     递归收集所有unit并构建局部faiss索引。
+    #     如果内部unit数量小于阈值（如100），则不建立索引。
+    #     支持自定义faiss_index_type。
+    #     """
+    #     try:
+    #         semantic_map = self._get_semantic_map()
+    #         units = self.get_all_units()
+    #         if len(units) < min_unit_threshold:
+    #             self._emb_index = None
+    #             self._index_to_uid = {}
+    #             logging.info(
+    #                 f"MemorySpace {self.name} 单元数{len(units)}，未建立索引。"
+    #             )
+    #             return
+
+    #         import faiss
+
+    #         # 优先用自身的faiss_index_type，否则继承父级SemanticMap，否则用默认
+    #         faiss_index_type = (
+    #             self._faiss_index_type
+    #             or getattr(semantic_map, "faiss_index_type", None)
+    #             or "IDMap,Flat"
+    #         )
+    #         self._emb_index = faiss.index_factory(embedding_dim, faiss_index_type)
+    #         self._index_to_uid = {}
+    #         embeddings = []
+    #         count = 0
+    #         for unit in units:
+    #             if unit.embedding is not None:
+    #                 embeddings.append(unit.embedding)
+    #                 self._index_to_uid[count] = unit.uid
+    #                 count += 1
+    #         if not embeddings:
+    #             logging.warning(
+    #                 f"MemorySpace '{self.name}' 没有有效的embeddings来构建索引"
+    #             )
+    #             return
+    #         self._emb_index.add(np.array(embeddings, dtype=np.float32))
+    #         logging.info(
+    #             f"MemorySpace '{self.name}' 索引构建完成，包含 {count} 个向量 (faiss_index_type={faiss_index_type})"
+    #         )
+    #     except ImportError:
+    #         logging.error("FAISS不可用，无法构建本地索引")
+    #     except Exception as e:
+    #         logging.error(f"构建索引时出错: {e}")
+
+    # def search_similarity_units_by_vector(
+    #     self, query_vector: np.ndarray, top_k: int = 5
+    # ) -> List[Tuple["MemoryUnit", float]]:
+    #     """
+    #     在局部索引中搜索相似单元。如果没有索引则暴力搜索。
+    #     """
+    #     semantic_map = self._get_semantic_map()
+    #     # 优先用索引
+    #     if self._emb_index and getattr(self._emb_index, "ntotal", 0) > 0:
+    #         try:
+    #             query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
+    #             D, I = self._emb_index.search(query_vector_np, top_k)
+    #             results = []
+    #             for i in range(len(I[0])):
+    #                 idx = int(I[0][i])
+    #                 if I[0][i] == -1:
+    #                     continue
+    #                 uid = self._index_to_uid.get(idx)
+    #                 if uid:
+    #                     unit = semantic_map.memory_units.get(uid)
+    #                     if unit:
+    #                         results.append((unit, float(D[0][i])))
+    #                     else:
+    #                         logging.warning(
+    #                             f"索引中的UID '{uid}' 在SemanticMap中不存在"
+    #                         )
+    #             return results
+    #         except Exception as e:
+    #             logging.error(f"索引搜索出错: {e}")
+    #             # 回退暴力搜索
+    #     # 暴力搜索
+    #     units = self.get_all_units()
+    #     if not units:
+    #         return []
+    #     sims = []
+    #     for u in units:
+    #         if u.embedding is not None:
+    #             a = query_vector.astype(np.float32)
+    #             b = u.embedding.astype(np.float32)
+    #             sim = float(
+    #                 np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+    #             )
+    #             sims.append((u, sim))
+    #     sims.sort(key=lambda x: x[1], reverse=True)
+    #     return sims[:top_k]
 
     # ===============================
     # 持久化方法
@@ -449,3 +625,4 @@ class MemorySpace:
         instance._child_space_names = save_data.get("child_space_names", set())
 
         return instance
+

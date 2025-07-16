@@ -115,7 +115,7 @@ class SemanticGraphIntegrator:
     
     def add_relationships_to_graph(self, relationships: List[Relationship], entity_id_map: Dict[str, str], source_unit_id: str) -> int:
         """
-        将关系添加到语义图中，直接使用SemanticGraph接口
+        将关系添加到语义图中，直接使用SemanticGraph接口 - 修复版本
         
         Args:
             relationships: 关系列表
@@ -137,12 +137,20 @@ class SemanticGraphIntegrator:
                     logging.warning(f"关系中的实体未找到: {relationship.source_entity} -> {relationship.target_entity}")
                     continue
                 
-                # 检查关系是否已存在
-                existing_rel = self.graph.get_relationship(source_entity_id, target_entity_id, relationship.relationship_type)
-                if existing_rel:
-                    logging.debug(f"关系已存在，跳过: {relationship.source_entity} -[{relationship.relationship_type}]-> {relationship.target_entity}")
-                    success_count += 1  # 视为成功
-                    continue
+                # 移除不存在的方法调用，直接尝试添加关系
+                # existing_rel = self.graph.get_relationship(source_entity_id, target_entity_id, relationship.relationship_type)
+                # if existing_rel:
+                #     logging.debug(f"关系已存在，跳过: {relationship.source_entity} -[{relationship.relationship_type}]-> {relationship.target_entity}")
+                #     success_count += 1  # 视为成功
+                #     continue
+                
+                # 检查关系是否已存在 - 使用NetworkX图检查
+                if self.graph.nx_graph.has_edge(source_entity_id, target_entity_id):
+                    edge_data = self.graph.nx_graph.get_edge_data(source_entity_id, target_entity_id)
+                    if edge_data and edge_data.get("type") == relationship.relationship_type:
+                        logging.debug(f"关系已存在，跳过: {relationship.source_entity} -[{relationship.relationship_type}]-> {relationship.target_entity}")
+                        success_count += 1  # 视为成功
+                        continue
                 
                 # 使用SemanticGraph接口添加关系
                 success = self.graph.add_relationship(
@@ -150,7 +158,7 @@ class SemanticGraphIntegrator:
                     target_uid=target_entity_id,
                     relationship_name=relationship.relationship_type,
                     description=relationship.description,
-                    keywords=",".join(relationship.keywords),
+                    keywords=",".join(relationship.keywords) if isinstance(relationship.keywords, list) else str(relationship.keywords),
                     strength=relationship.strength,
                     source_text=relationship.source_text,
                     source_unit_id=source_unit_id,
@@ -160,6 +168,8 @@ class SemanticGraphIntegrator:
                 if success:
                     success_count += 1
                     logging.debug(f"已添加关系: {relationship.source_entity} -[{relationship.relationship_type}]-> {relationship.target_entity}")
+                else:
+                    logging.warning(f"添加关系失败: {relationship.source_entity} -[{relationship.relationship_type}]-> {relationship.target_entity}")
                 
             except Exception as e:
                 logging.error(f"添加关系失败: {relationship.source_entity} -> {relationship.target_entity} - {e}")
@@ -231,19 +241,11 @@ class SemanticGraphIntegrator:
             return {"success": False, "error": str(e)}
     
     def batch_extract_entities_from_space(self, 
-                                        space_name: str = "locomo_dialogs",
-                                        max_units: int = 50,
-                                        unit_filter: Optional[callable] = None) -> Dict[str, Any]:
+                                    space_name: str = "locomo_dialogs",
+                                    max_units: int = 50,
+                                    unit_filter: Optional[callable] = None) -> Dict[str, Any]:
         """
-        批量处理指定空间中的内存单元进行实体关系抽取
-        
-        Args:
-            space_name: 要处理的空间名称
-            max_units: 最大处理单元数
-            unit_filter: 单元过滤函数
-            
-        Returns:
-            批量处理结果统计
+        批量处理指定空间中的内存单元进行实体关系抽取 - 修复版本
         """
         logging.info(f"开始批量实体抽取，空间: {space_name}, 最大单元数: {max_units}")
         
@@ -253,7 +255,8 @@ class SemanticGraphIntegrator:
             logging.error(f"空间 {space_name} 不存在")
             return {"error": "space_not_found"}
         
-        unit_ids = list(space.get_memory_uids())
+        # 使用正确的方法获取单元UIDs
+        unit_ids = list(space.get_unit_uids())  # 修复：使用get_unit_uids()而不是get_memory_uids()
         
         # 应用过滤器
         units_to_process = []
@@ -264,7 +267,7 @@ class SemanticGraphIntegrator:
         
         logging.info(f"将处理 {len(units_to_process)} 个单元")
         
-        # 批量处理
+        # 批量处理逻辑保持不变...
         results = {
             "total_units": len(units_to_process),
             "processed": 0,
@@ -313,7 +316,7 @@ class SemanticGraphIntegrator:
         return f"{normalized}_{hash_suffix}"
     
     def get_entity_statistics(self) -> Dict[str, Any]:
-        """获取实体统计信息"""
+        """获取实体统计信息 - 修复版本"""
         stats = {
             "total_entities": 0,
             "entity_types": {},
@@ -321,10 +324,10 @@ class SemanticGraphIntegrator:
             "relationship_types": {}
         }
         
-        # 统计实体
+        # 统计实体 - 使用正确的方法名
         entity_space = self.graph.semantic_map.get_memory_space("extracted_entities")
         if entity_space:
-            entity_uids = entity_space.get_memory_uids()
+            entity_uids = entity_space.get_unit_uids()  # 修复：使用get_unit_uids()而不是get_memory_uids()
             stats["total_entities"] = len(entity_uids)
             
             for uid in entity_uids:

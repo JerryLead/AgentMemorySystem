@@ -11,9 +11,10 @@ import torch
 
 # 添加父目录到路径以便导入dev模块
 sys.path.append(str(Path(__file__).parent.parent.parent))
+# from benchmark.llm_utils.prompt_builder import PromptBuilder
 from dev import SemanticGraph, MemoryUnit
-from benchmark.task_eval.evaluation import eval_question_answering, f1_score, exact_match_score
-from benchmark.llm_utils import LLMClient, PromptBuilder, AnswerExtractor
+from benchmark.task_eval.evaluation import eval_question_answering, calculate_f1_score, exact_match_score
+from benchmark.llm_utils import LLMClient, AnswerExtractor, PromptBuilder
 
 # --- 配置 ---
 LOGGING_LEVEL = logging.INFO
@@ -216,7 +217,7 @@ def _evaluate_answer(predicted_answer: str,
     """评估答案质量"""
     
     # F1得分
-    f1_score_result = f1_score(predicted_answer, golden_answer)
+    f1_score_result = calculate_f1_score(predicted_answer, golden_answer)
     
     # 精确匹配
     exact_match = 1.0 if exact_match_score(predicted_answer, golden_answer) else 0.0
@@ -755,7 +756,7 @@ def enhanced_search_and_evaluate(graph: SemanticGraph, qa_pairs: List[Dict], eva
         # 4. 评估
         try:
             # 使用F1得分评估
-            f1_score_result = f1_score(predicted_answer, golden_answer)
+            f1_score_result = calculate_f1_score(predicted_answer, golden_answer)
             
             # 使用语义相似度评估
             embedding1 = eval_model.encode(predicted_answer, convert_to_tensor=True)

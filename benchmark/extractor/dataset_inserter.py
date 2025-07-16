@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 from pathlib import Path
@@ -14,6 +15,7 @@ class ConversationSemanticStorage:
     """
     对话语义存储器 - 按 sample_id 将 LoCoMo 数据存储到 semantic_map/graph 中
     支持原始数据和抽取结果的混合存储，可指定存储特定对话
+    已适配新的 semantic_map/graph 架构
     """
     
     def __init__(self, output_dir: str = "benchmark/conversation_semantic_storage"):
@@ -28,115 +30,8 @@ class ConversationSemanticStorage:
         # 初始化语义图谱
         self.semantic_graph = SemanticGraph()
         
-        self.logger.info("ConversationSemanticStorage 初始化完成")
+        self.logger.info("ConversationSemanticStorage 初始化完成（已适配新架构）")
     
-    # def store_conversation(self, 
-    #                       sample_id: str,
-    #                       raw_dataset_file: str = "benchmark/dataset/locomo/locomo10.json",
-    #                       extracted_dataset_file: str = "benchmark/dataset/locomo/extraction/locomo_extracted_full_dataset.json",
-    #                       include_raw: bool = True,
-    #                       include_extracted: bool = True) -> Dict[str, Any]:
-    #     """
-    #     存储指定对话到语义图谱中
-        
-    #     Args:
-    #         sample_id: 对话ID (如 "conv-26", "conv-30")
-    #         raw_dataset_file: 原始数据文件路径
-    #         extracted_dataset_file: 抽取结果数据文件路径
-    #         include_raw: 是否包含原始数据
-    #         include_extracted: 是否包含抽取结果
-            
-    #     Returns:
-    #         存储统计信息
-    #     """
-    #     self.logger.info(f"🚀 开始存储对话 {sample_id}")
-        
-    #     # 初始化存储统计
-    #     storage_stats = {
-    #         "sample_id": sample_id,
-    #         "include_raw": include_raw,
-    #         "include_extracted": include_extracted,
-    #         "raw_dataset_file": raw_dataset_file,
-    #         "extracted_dataset_file": extracted_dataset_file,
-    #         "storage_breakdown": {
-    #             # 原始数据
-    #             "conversations": 0,
-    #             "observations": 0,
-    #             "events": 0,
-    #             "summaries": 0,
-    #             "qa_pairs": 0,
-    #             # 抽取数据
-    #             "entities": 0,
-    #             "relationships": 0,
-    #             "keywords": 0,
-    #             "statistics": 0
-    #         },
-    #         "namespace_usage": {},
-    #         "processing_time": {
-    #             "start_time": datetime.now().isoformat()
-    #         }
-    #     }
-        
-    #     start_time = datetime.now()
-        
-    #     try:
-    #         # 加载数据
-    #         raw_data = None
-    #         extracted_data = None
-            
-    #         if include_raw:
-    #             raw_data = self._load_raw_conversation(raw_dataset_file, sample_id)
-    #             if raw_data:
-    #                 self.logger.info(f"✅ 成功加载原始数据: {sample_id}")
-    #             else:
-    #                 self.logger.warning(f"⚠️ 未找到原始数据: {sample_id}")
-            
-    #         if include_extracted:
-    #             extracted_data = self._load_extracted_conversation(extracted_dataset_file, sample_id)
-    #             if extracted_data:
-    #                 self.logger.info(f"✅ 成功加载抽取数据: {sample_id}")
-    #             else:
-    #                 self.logger.warning(f"⚠️ 未找到抽取数据: {sample_id}")
-            
-    #         # 存储原始数据
-    #         if raw_data:
-    #             raw_stats = self._store_raw_conversation_data(raw_data, sample_id)
-    #             for key, value in raw_stats.items():
-    #                 storage_stats["storage_breakdown"][key] += value
-            
-    #         # 存储抽取结果
-    #         if extracted_data:
-    #             extracted_stats = self._store_extracted_conversation_data(extracted_data, sample_id)
-    #             for key, value in extracted_stats.items():
-    #                 storage_stats["storage_breakdown"][key] += value
-                
-    #             # 建立实体关系
-    #             self._establish_entity_relationships(extracted_data, sample_id)
-            
-    #         # 构建语义索引
-    #         self.logger.info("构建语义索引...")
-    #         self.semantic_graph.build_semantic_map_index()
-            
-    #         # 统计命名空间使用情况
-    #         storage_stats["namespace_usage"] = self._get_namespace_usage_stats()
-            
-    #         end_time = datetime.now()
-    #         storage_stats["processing_time"]["end_time"] = end_time.isoformat()
-    #         storage_stats["processing_time"]["duration_seconds"] = (end_time - start_time).total_seconds()
-            
-    #         # 保存存储统计
-    #         stats_file = self.output_dir / f"{sample_id}_storage_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    #         with open(stats_file, 'w', encoding='utf-8') as f:
-    #             json.dump(storage_stats, f, ensure_ascii=False, indent=2)
-            
-    #         self.logger.info(f"🎉 对话 {sample_id} 存储完成！统计信息保存至: {stats_file}")
-    #         return storage_stats
-            
-    #     except Exception as e:
-    #         self.logger.error(f"❌ 存储对话 {sample_id} 失败: {e}")
-    #         raise
-
-    # 更新存储统计信息结构
     def store_conversation(self, 
                         sample_id: str,
                         raw_dataset_file: str = "benchmark/dataset/locomo/locomo10.json",
@@ -144,7 +39,7 @@ class ConversationSemanticStorage:
                         include_raw: bool = True,
                         include_extracted: bool = True) -> Dict[str, Any]:
         """
-        存储指定对话到语义图谱中
+        存储指定对话到语义图谱中（适配新架构）
         
         Args:
             sample_id: 对话ID (如 "conv-26", "conv-30")
@@ -171,7 +66,6 @@ class ConversationSemanticStorage:
                 "observations": 0,
                 "events": 0,
                 "summaries": 0,
-                # "qa_pairs": 0,  # 移除QA统计
                 # 抽取数据
                 "entities": 0,
                 "relationships": 0,
@@ -252,111 +146,13 @@ class ConversationSemanticStorage:
             self.logger.error(f"❌ 存储对话 {sample_id} 失败: {e}")
             raise
     
-    # def store_all_conversations(self,
-    #                            raw_dataset_file: str = "benchmark/dataset/locomo/locomo10.json",
-    #                            extracted_dataset_file: str = "benchmark/dataset/locomo/extraction/locomo_extracted_full_dataset.json",
-    #                            include_raw: bool = True,
-    #                            include_extracted: bool = True) -> Dict[str, Any]:
-    #     """
-    #     存储所有对话到语义图谱中
-        
-    #     Args:
-    #         raw_dataset_file: 原始数据文件路径
-    #         extracted_dataset_file: 抽取结果数据文件路径
-    #         include_raw: 是否包含原始数据
-    #         include_extracted: 是否包含抽取结果
-            
-    #     Returns:
-    #         所有对话的存储统计信息
-    #     """
-    #     self.logger.info("🚀 开始存储所有对话")
-        
-    #     # 获取所有可用的sample_id
-    #     all_sample_ids = set()
-        
-    #     if include_raw:
-    #         with open(raw_dataset_file, 'r', encoding='utf-8') as f:
-    #             raw_dataset = json.load(f)
-    #         for sample in raw_dataset:
-    #             sample_id = sample.get('sample_id')
-    #             if sample_id:
-    #                 all_sample_ids.add(sample_id)
-        
-    #     if include_extracted:
-    #         with open(extracted_dataset_file, 'r', encoding='utf-8') as f:
-    #             extracted_dataset = json.load(f)
-    #         extracted_samples = extracted_dataset.get("samples", {})
-    #         all_sample_ids.update(extracted_samples.keys())
-        
-    #     self.logger.info(f"发现 {len(all_sample_ids)} 个对话: {sorted(all_sample_ids)}")
-        
-    #     # 存储每个对话
-    #     all_stats = {
-    #         "total_conversations": len(all_sample_ids),
-    #         "processed_conversations": 0,
-    #         "failed_conversations": [],
-    #         "conversation_stats": {},
-    #         "overall_storage_breakdown": {
-    #             "conversations": 0,
-    #             "observations": 0,
-    #             "events": 0,
-    #             "summaries": 0,
-    #             "qa_pairs": 0,
-    #             "entities": 0,
-    #             "relationships": 0,
-    #             "keywords": 0,
-    #             "statistics": 0
-    #         },
-    #         "processing_time": {
-    #             "start_time": datetime.now().isoformat()
-    #         }
-    #     }
-        
-    #     start_time = datetime.now()
-        
-    #     for sample_id in sorted(all_sample_ids):
-    #         try:
-    #             stats = self.store_conversation(
-    #                 sample_id=sample_id,
-    #                 raw_dataset_file=raw_dataset_file,
-    #                 extracted_dataset_file=extracted_dataset_file,
-    #                 include_raw=include_raw,
-    #                 include_extracted=include_extracted
-    #             )
-                
-    #             all_stats["conversation_stats"][sample_id] = stats
-    #             all_stats["processed_conversations"] += 1
-                
-    #             # 累加统计信息
-    #             for key, value in stats["storage_breakdown"].items():
-    #                 all_stats["overall_storage_breakdown"][key] += value
-                
-    #             self.logger.info(f"✅ {sample_id} 处理完成")
-                
-    #         except Exception as e:
-    #             self.logger.error(f"❌ {sample_id} 处理失败: {e}")
-    #             all_stats["failed_conversations"].append(sample_id)
-        
-    #     end_time = datetime.now()
-    #     all_stats["processing_time"]["end_time"] = end_time.isoformat()
-    #     all_stats["processing_time"]["duration_seconds"] = (end_time - start_time).total_seconds()
-        
-    #     # 保存总体统计
-    #     stats_file = self.output_dir / f"all_conversations_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    #     with open(stats_file, 'w', encoding='utf-8') as f:
-    #         json.dump(all_stats, f, ensure_ascii=False, indent=2)
-        
-    #     self.logger.info(f"🎉 所有对话存储完成！总体统计保存至: {stats_file}")
-    #     return all_stats
-
-    # 更新 store_all_conversations 方法的统计结构
     def store_all_conversations(self,
                             raw_dataset_file: str = "benchmark/dataset/locomo/locomo10.json",
                             extracted_dataset_file: str = "benchmark/dataset/locomo/extraction/locomo_extracted_full_dataset.json",
                             include_raw: bool = True,
                             include_extracted: bool = True) -> Dict[str, Any]:
         """
-        存储所有对话到语义图谱中
+        存储所有对话到语义图谱中（适配新架构）
         
         Args:
             raw_dataset_file: 原始数据文件路径
@@ -399,7 +195,6 @@ class ConversationSemanticStorage:
                 "observations": 0,
                 "events": 0,
                 "summaries": 0,
-                # "qa_pairs": 0,  # 移除QA统计
                 "entities": 0,
                 "relationships": 0,
                 "keywords": 0,
@@ -483,18 +278,16 @@ class ConversationSemanticStorage:
             self.logger.error(f"加载抽取对话 {sample_id} 失败: {e}")
             return None
         
-    # 在 _store_raw_conversation_data 方法中，注释掉 QA 数据存储
     def _store_raw_conversation_data(self, sample: Dict, sample_id: str) -> Dict[str, int]:
-        """存储单个对话的原始数据"""
+        """存储单个对话的原始数据（适配新架构）"""
         stats = {
             "conversations": 0,
             "observations": 0,
             "events": 0,
             "summaries": 0,
-            # "qa_pairs": 0  # 移除QA统计
         }
         
-        # 创建对话专用空间
+        # 创建对话专用空间（使用新的API）
         self.semantic_graph.create_memory_space_in_map(f"conversation_{sample_id}")
         self.semantic_graph.create_memory_space_in_map(f"raw_data_{sample_id}")
         
@@ -514,50 +307,10 @@ class ConversationSemanticStorage:
         summary_count = self._store_summary_data(sample, sample_id)
         stats["summaries"] += summary_count
         
-        # 5. 存储问答数据 - 注释掉
-        # qa_count = self._store_qa_data(sample, sample_id)
-        # stats["qa_pairs"] += qa_count
-        
         return stats
     
-    # def _store_raw_conversation_data(self, sample: Dict, sample_id: str) -> Dict[str, int]:
-    #     """存储单个对话的原始数据"""
-    #     stats = {
-    #         "conversations": 0,
-    #         "observations": 0,
-    #         "events": 0,
-    #         "summaries": 0,
-    #         "qa_pairs": 0
-    #     }
-        
-    #     # 创建对话专用空间
-    #     self.semantic_graph.create_memory_space_in_map(f"conversation_{sample_id}")
-    #     self.semantic_graph.create_memory_space_in_map(f"raw_data_{sample_id}")
-        
-    #     # 1. 存储对话数据
-    #     conv_count = self._store_conversation_data(sample, sample_id)
-    #     stats["conversations"] += conv_count
-        
-    #     # 2. 存储观察记录
-    #     obs_count = self._store_observation_data(sample, sample_id)
-    #     stats["observations"] += obs_count
-        
-    #     # 3. 存储事件记录
-    #     event_count = self._store_event_data(sample, sample_id)
-    #     stats["events"] += event_count
-        
-    #     # 4. 存储会话摘要
-    #     summary_count = self._store_summary_data(sample, sample_id)
-    #     stats["summaries"] += summary_count
-        
-    #     # 5. 存储问答数据
-    #     qa_count = self._store_qa_data(sample, sample_id)
-    #     stats["qa_pairs"] += qa_count
-        
-    #     return stats
-    
     def _store_extracted_conversation_data(self, sample_data: Dict, sample_id: str) -> Dict[str, int]:
-        """存储单个对话的抽取结果数据"""
+        """存储单个对话的抽取结果数据（适配新架构）"""
         stats = {
             "entities": 0,
             "relationships": 0,
@@ -565,7 +318,7 @@ class ConversationSemanticStorage:
             "statistics": 0
         }
         
-        # 创建抽取数据专用空间
+        # 创建抽取数据专用空间（使用新的API）
         self.semantic_graph.create_memory_space_in_map(f"conversation_{sample_id}")
         self.semantic_graph.create_memory_space_in_map(f"extracted_data_{sample_id}")
         
@@ -588,7 +341,7 @@ class ConversationSemanticStorage:
         return stats
     
     def _store_conversation_data(self, sample: Dict, sample_id: str) -> int:
-        """存储对话数据"""
+        """存储对话数据（适配新架构）"""
         conversation = sample.get('conversation', {})
         if not conversation:
             return 0
@@ -639,7 +392,7 @@ class ConversationSemanticStorage:
                 }
             )
             
-            # 添加到对话专用空间
+            # 添加到对话专用空间（使用新的API）
             self.semantic_graph.add_unit(unit, space_names=[
                 f"conversation_{sample_id}",  # 对话专用空间
                 f"raw_data_{sample_id}",      # 原始数据空间
@@ -651,7 +404,7 @@ class ConversationSemanticStorage:
         return 0
     
     def _store_observation_data(self, sample: Dict, sample_id: str) -> int:
-        """存储观察记录"""
+        """存储观察记录（适配新架构）"""
         observations = sample.get('observation', {})
         if not observations:
             return 0
@@ -697,7 +450,7 @@ class ConversationSemanticStorage:
                             }
                         )
                         
-                        # 添加到对话专用空间
+                        # 添加到对话专用空间（使用新的API）
                         self.semantic_graph.add_unit(unit, space_names=[
                             f"conversation_{sample_id}",
                             f"raw_data_{sample_id}",
@@ -709,7 +462,7 @@ class ConversationSemanticStorage:
         return stored_count
     
     def _store_event_data(self, sample: Dict, sample_id: str) -> int:
-        """存储事件记录"""
+        """存储事件记录（适配新架构）"""
         event_summary = sample.get('event_summary', {})
         if not event_summary:
             return 0
@@ -754,7 +507,7 @@ class ConversationSemanticStorage:
                         }
                     )
                     
-                    # 添加到对话专用空间
+                    # 添加到对话专用空间（使用新的API）
                     self.semantic_graph.add_unit(unit, space_names=[
                         f"conversation_{sample_id}",
                         f"raw_data_{sample_id}",
@@ -766,7 +519,7 @@ class ConversationSemanticStorage:
         return stored_count
     
     def _store_summary_data(self, sample: Dict, sample_id: str) -> int:
-        """存储会话摘要"""
+        """存储会话摘要（适配新架构）"""
         session_summary = sample.get('session_summary', {})
         if not session_summary:
             return 0
@@ -796,7 +549,7 @@ class ConversationSemanticStorage:
                 }
             )
             
-            # 添加到对话专用空间
+            # 添加到对话专用空间（使用新的API）
             self.semantic_graph.add_unit(unit, space_names=[
                 f"conversation_{sample_id}",
                 f"raw_data_{sample_id}",
@@ -807,7 +560,6 @@ class ConversationSemanticStorage:
         
         return stored_count
     
-    # 修改 _store_qa_data 方法为空实现
     def _store_qa_data(self, sample: Dict, sample_id: str) -> int:
         """
         存储问答数据 - 已禁用
@@ -816,7 +568,6 @@ class ConversationSemanticStorage:
         self.logger.info(f"跳过QA数据存储 - QA数据将用作测试集 (sample_id: {sample_id})")
         return 0
     
-    # 添加一个新的方法来获取QA数据作为测试集
     def get_qa_test_data(self, 
                         sample_ids: Optional[List[str]] = None,
                         raw_dataset_file: str = "benchmark/dataset/locomo/locomo10.json") -> Dict[str, List[Dict]]:
@@ -861,67 +612,8 @@ class ConversationSemanticStorage:
             self.logger.error(f"❌ 提取QA测试数据失败: {e}")
             return {}
     
-    # def _store_qa_data(self, sample: Dict, sample_id: str) -> int:
-    #     """存储问答数据"""
-    #     qa_data = sample.get('qa', [])
-    #     if not qa_data:
-    #         return 0
-        
-    #     stored_count = 0
-        
-    #     # 将QA数据按类型分组
-    #     qa_by_category = {}
-    #     qa_adversarial = []
-        
-    #     for qa_idx, qa_item in enumerate(qa_data):
-    #         if isinstance(qa_item, dict):
-    #             if 'category' in qa_item:
-    #                 category = qa_item['category']
-    #                 if category not in qa_by_category:
-    #                     qa_by_category[category] = []
-    #                 qa_by_category[category].append((qa_idx, qa_item))
-    #             elif 'adversarial_answer' in qa_item:
-    #                 qa_adversarial.append((qa_idx, qa_item))
-        
-    #     # 存储分类问答
-    #     for category, qa_items in qa_by_category.items():
-    #         if qa_items:
-    #             category_text = f"Category {category} Questions for {sample_id}:\n"
-    #             category_text += f"Total questions in this category: {len(qa_items)}\n"
-    #             category_text += "Question indices: " + ", ".join([str(idx) for idx, _ in qa_items])
-                
-    #             unit = MemoryUnit(
-    #                 uid=f"{sample_id}_qa_category_{category}",
-    #                 raw_data={
-    #                     "text_content": category_text,
-    #                     "category": category,
-    #                     "question_count": len(qa_items),
-    #                     "question_indices": [idx for idx, _ in qa_items],
-    #                     "sample_id": sample_id,
-    #                     "data_type": "qa_category",
-    #                     "data_source": "raw"
-    #                 },
-    #                 metadata={
-    #                     "conversation_id": sample_id,
-    #                     "data_layer": "raw",
-    #                     "content_type": "qa_category",
-    #                     "qa_category": category,
-    #                     "created": datetime.now().isoformat()
-    #                 }
-    #             )
-                
-    #             self.semantic_graph.add_unit(unit, space_names=[
-    #                 f"conversation_{sample_id}",
-    #                 f"raw_data_{sample_id}",
-    #                 "all_qa"
-    #             ])
-                
-    #             stored_count += 1
-        
-    #     return stored_count
-    
     def _store_extracted_entities(self, sample_data: Dict, sample_id: str) -> int:
-        """存储抽取的实体"""
+        """存储抽取的实体（适配新架构）"""
         entities = sample_data.get('entities', [])
         if not entities:
             return 0
@@ -964,7 +656,7 @@ class ConversationSemanticStorage:
                 }
             )
             
-            # 添加到对话专用空间
+            # 添加到对话专用空间（使用新的API）
             self.semantic_graph.add_unit(unit, space_names=[
                 f"conversation_{sample_id}",
                 f"extracted_data_{sample_id}",
@@ -976,7 +668,7 @@ class ConversationSemanticStorage:
         return stored_count
     
     def _store_extracted_relationships(self, sample_data: Dict, sample_id: str) -> int:
-        """存储抽取的关系"""
+        """存储抽取的关系（适配新架构）"""
         relationships = sample_data.get('relationships', [])
         if not relationships:
             return 0
@@ -1025,7 +717,7 @@ class ConversationSemanticStorage:
                 }
             )
             
-            # 添加到对话专用空间
+            # 添加到对话专用空间（使用新的API）
             self.semantic_graph.add_unit(unit, space_names=[
                 f"conversation_{sample_id}",
                 f"extracted_data_{sample_id}",
@@ -1037,7 +729,7 @@ class ConversationSemanticStorage:
         return stored_count
     
     def _store_keywords(self, sample_data: Dict, sample_id: str) -> int:
-        """存储关键词"""
+        """存储关键词（适配新架构）"""
         keywords = sample_data.get('content_keywords', [])
         if not keywords:
             return 0
@@ -1063,7 +755,7 @@ class ConversationSemanticStorage:
             }
         )
         
-        # 添加到对话专用空间
+        # 添加到对话专用空间（使用新的API）
         self.semantic_graph.add_unit(unit, space_names=[
             f"conversation_{sample_id}",
             f"extracted_data_{sample_id}",
@@ -1073,7 +765,7 @@ class ConversationSemanticStorage:
         return 1
     
     def _store_statistics(self, sample_data: Dict, sample_id: str) -> int:
-        """存储统计信息"""
+        """存储统计信息（适配新架构）"""
         extraction_stats = sample_data.get('extraction_statistics', {})
         entity_stats = sample_data.get('entity_statistics', {})
         graph_structure = sample_data.get('graph_structure', {})
@@ -1108,7 +800,7 @@ class ConversationSemanticStorage:
             }
         )
         
-        # 添加到对话专用空间
+        # 添加到对话专用空间（使用新的API）
         self.semantic_graph.add_unit(unit, space_names=[
             f"conversation_{sample_id}",
             f"extracted_data_{sample_id}",
@@ -1118,7 +810,7 @@ class ConversationSemanticStorage:
         return 1
     
     def _establish_entity_relationships(self, sample_data: Dict, sample_id: str):
-        """在语义图中建立实体间的显式关系"""
+        """在语义图中建立实体间的显式关系（适配新架构）"""
         entities = sample_data.get('entities', [])
         relationships = sample_data.get('relationships', [])
         
@@ -1146,8 +838,8 @@ class ConversationSemanticStorage:
             target_uid = entity_name_to_uid.get(target_name)
             
             if source_uid and target_uid:
-                # 在语义图中添加关系
-                self.semantic_graph.add_relationship(
+                # 在语义图中添加关系（使用新的API）
+                success = self.semantic_graph.add_relationship(
                     source_uid=source_uid,
                     target_uid=target_uid,
                     relationship_name=rel_type,
@@ -1157,14 +849,19 @@ class ConversationSemanticStorage:
                     conversation_id=sample_id,
                     created=datetime.now().isoformat()
                 )
-                self.logger.debug(f"已建立关系: {source_name} --[{rel_type}]--> {target_name}")
+                if success:
+                    self.logger.debug(f"已建立关系: {source_name} --[{rel_type}]--> {target_name}")
+                else:
+                    self.logger.warning(f"建立关系失败: {source_name} --[{rel_type}]--> {target_name}")
     
     def _get_namespace_usage_stats(self) -> Dict[str, int]:
-        """获取命名空间使用统计"""
+        """获取命名空间使用统计（适配新架构）"""
         stats = {}
         
         for space_name, space in self.semantic_graph.semantic_map.memory_spaces.items():
-            stats[space_name] = len(space.get_memory_uids())
+            # 使用新的API获取空间中的单元数量
+            unit_uids = space.get_unit_uids()
+            stats[space_name] = len(unit_uids)
         
         return stats
     
@@ -1206,7 +903,7 @@ class ConversationSemanticStorage:
 
 class ConversationSemanticQuerier:
     """
-    对话语义查询器 - 支持按对话进行RAG检索
+    对话语义查询器 - 支持按对话进行RAG检索（适配新架构）
     """
     
     def __init__(self, semantic_graph: SemanticGraph):
@@ -1221,7 +918,7 @@ class ConversationSemanticQuerier:
                           data_types: List[str] = None,
                           k: int = 5) -> Dict[str, Any]:
         """
-        查询指定对话
+        查询指定对话（适配新架构）
         
         Args:
             query_text: 查询文本
@@ -1240,13 +937,14 @@ class ConversationSemanticQuerier:
         }
         
         try:
-            # 在对话专用空间中搜索
-            space_name = f"conversation_{conversation_id}"
+            # 在对话专用空间中搜索（使用新的API）
+            space_names = [f"conversation_{conversation_id}"]
             
+            # 使用新的搜索API
             namespace_results = self.semantic_graph.search_similarity_in_graph(
                 query_text=query_text,
-                k=k * 2,
-                space_name=space_name
+                top_k=k * 2,
+                ms_names=space_names
             )
             
             # 按数据源过滤
@@ -1293,7 +991,7 @@ class ConversationSemanticQuerier:
                                data_types: List[str] = None,
                                k: int = 5) -> Dict[str, Any]:
         """
-        查询所有对话
+        查询所有对话（适配新架构）
         
         Args:
             query_text: 查询文本
@@ -1309,7 +1007,7 @@ class ConversationSemanticQuerier:
             "conversation_results": {}
         }
         
-        # 获取所有对话空间
+        # 获取所有对话空间（使用新的API）
         conversation_spaces = [
             space_name for space_name in self.semantic_graph.semantic_map.memory_spaces.keys()
             if space_name.startswith("conversation_")
@@ -1330,9 +1028,263 @@ class ConversationSemanticQuerier:
         
         return results
 
+def main():
+    """命令行入口 - 使用argparse解析参数"""
+    parser = argparse.ArgumentParser(
+        description="LoCoMo对话语义存储器 - 将对话数据存储到语义图谱中（新架构版本）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+        示例:
+        # 存储单个对话conv-26
+        python dataset_inserter.py --sample-id conv-26
 
+        # 存储所有对话
+        python dataset_inserter.py --store-all
+
+        # 只存储原始数据，不包含抽取结果
+        python dataset_inserter.py --sample-id conv-30 --raw-only
+
+        # 只存储抽取结果，不包含原始数据
+        python dataset_inserter.py --sample-id conv-26 --extracted-only
+
+        # 包含QA数据（不推荐，QA应作为测试集）
+        python dataset_inserter.py --sample-id conv-26 --include-qa
+
+        特性:
+        ✅ 适配新的semantic_map/graph架构
+        ✅ QA数据默认保留作为测试集（不插入语义图谱）
+        ✅ 支持原始数据和抽取结果混合存储
+        ✅ 按对话ID组织的命名空间管理
+        ✅ 完整的存储统计和报告
+        """
+    )
+    
+    # 存储目标选择（互斥组）
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        "--sample-id", 
+        type=str,
+        help="存储指定的对话样本 (如: conv-26, conv-30)"
+    )
+    target_group.add_argument(
+        "--store-all", 
+        action="store_true",
+        help="存储所有对话样本"
+    )
+    
+    # 数据源选择（互斥组）
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--raw-only", 
+        action="store_true",
+        help="只存储原始数据，不包含抽取结果"
+    )
+    source_group.add_argument(
+        "--extracted-only", 
+        action="store_true",
+        help="只存储抽取结果，不包含原始数据"
+    )
+    
+    # 数据文件路径
+    parser.add_argument(
+        "--raw-dataset", 
+        default="benchmark/dataset/locomo/locomo10.json",
+        help="原始数据集文件路径 (默认: benchmark/dataset/locomo/locomo10.json)"
+    )
+    parser.add_argument(
+        "--extracted-dataset", 
+        default="benchmark/dataset/locomo/extraction/locomo_extracted_full_dataset.json",
+        help="抽取数据集文件路径 (默认: benchmark/dataset/locomo/extraction/locomo_extracted_full_dataset.json)"
+    )
+    
+    # 输出选项
+    parser.add_argument(
+        "--output-dir", 
+        default="benchmark/conversation_semantic_storage",
+        help="输出目录路径 (默认: benchmark/conversation_semantic_storage)"
+    )
+    
+    # QA数据处理选项
+    parser.add_argument(
+        "--include-qa", 
+        action="store_true",
+        help="包含QA数据到语义图谱中（默认保留作为测试集，不推荐开启）"
+    )
+    parser.add_argument(
+        "--skip-qa", 
+        action="store_true", 
+        default=True,
+        help="跳过QA数据，保留作为测试集（默认行为）"
+    )
+    
+    # 其他选项
+    parser.add_argument(
+        "--log-level", 
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="日志级别 (默认: INFO)"
+    )
+    parser.add_argument(
+        "--save-graph", 
+        action="store_true",
+        help="保存语义图谱到磁盘"
+    )
+    parser.add_argument(
+        "--dry-run", 
+        action="store_true",
+        help="试运行模式，只显示将要执行的操作，不实际存储"
+    )
+    
+    args = parser.parse_args()
+    
+    # 设置日志级别
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    # 参数验证
+    if not Path(args.raw_dataset).exists() and not args.extracted_only:
+        logger.error(f"❌ 原始数据集文件不存在: {args.raw_dataset}")
+        sys.exit(1)
+    
+    if not Path(args.extracted_dataset).exists() and not args.raw_only:
+        logger.error(f"❌ 抽取数据集文件不存在: {args.extracted_dataset}")
+        sys.exit(1)
+    
+    # 确定数据源包含选项
+    include_raw = not args.extracted_only
+    include_extracted = not args.raw_only
+    
+    # 处理QA选项冲突
+    if args.include_qa and args.skip_qa:
+        # 如果同时指定，include_qa优先
+        skip_qa = False
+        logger.warning("⚠️ 同时指定了 --include-qa 和 --skip-qa，优先使用 --include-qa")
+    else:
+        skip_qa = args.skip_qa
+    
+    # 显示配置信息
+    logger.info("🚀 LoCoMo对话语义存储器启动（新架构版本）")
+    logger.info("=" * 60)
+    
+    if args.sample_id:
+        logger.info(f"📁 存储目标: 单个对话 ({args.sample_id})")
+    else:
+        logger.info(f"📁 存储目标: 所有对话")
+    
+    logger.info(f"📊 数据源: 原始数据={include_raw}, 抽取结果={include_extracted}")
+    logger.info(f"🔍 QA处理: {'保留作为测试集' if skip_qa else '包含到语义图谱'}")
+    logger.info(f"📂 输出目录: {args.output_dir}")
+    
+    if args.dry_run:
+        logger.info("🧪 试运行模式 - 不会实际存储数据")
+    
+    logger.info("=" * 60)
+    
+    try:
+        # 创建存储器
+        if not args.dry_run:
+            storage = ConversationSemanticStorage(output_dir=args.output_dir)
+        else:
+            logger.info("🧪 [试运行] 将创建ConversationSemanticStorage实例")
+            storage = None
+        
+        # 执行存储操作
+        if args.sample_id:
+            # 存储单个对话
+            logger.info(f"开始存储对话: {args.sample_id}")
+            
+            if not args.dry_run:
+                stats = storage.store_conversation(
+                    sample_id=args.sample_id,
+                    raw_dataset_file=args.raw_dataset,
+                    extracted_dataset_file=args.extracted_dataset,
+                    include_raw=include_raw,
+                    include_extracted=include_extracted
+                )
+                
+                # 显示存储结果
+                print(f"\n🎉 对话 {args.sample_id} 存储完成！")
+                print(f"📊 存储统计:")
+                for key, value in stats["storage_breakdown"].items():
+                    if value > 0:
+                        print(f"  - {key}: {value}")
+                
+                if stats["qa_info"]["total_qa_pairs"] > 0:
+                    print(f"📋 QA测试集: {stats['qa_info']['total_qa_pairs']} 个问答对")
+                
+                print(f"📂 统计文件: {args.output_dir}")
+                
+                # 可选：保存语义图谱
+                if args.save_graph:
+                    graph_path = Path(args.output_dir) / f"{args.sample_id}_semantic_graph_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    storage.semantic_graph.save_graph(str(graph_path))
+                    print(f"💾 语义图谱已保存: {graph_path}")
+                
+            else:
+                print(f"🧪 [试运行] 将存储对话 {args.sample_id}")
+                print(f"🧪 [试运行] 包含原始数据: {include_raw}")
+                print(f"🧪 [试运行] 包含抽取结果: {include_extracted}")
+                print(f"🧪 [试运行] QA处理: {'保留作为测试集' if skip_qa else '包含到语义图谱'}")
+        
+        else:
+            # 存储所有对话
+            logger.info("开始存储所有对话")
+            
+            if not args.dry_run:
+                all_stats = storage.store_all_conversations(
+                    raw_dataset_file=args.raw_dataset,
+                    extracted_dataset_file=args.extracted_dataset,
+                    include_raw=include_raw,
+                    include_extracted=include_extracted
+                )
+                
+                # 显示存储结果
+                print(f"\n🎉 所有对话存储完成！")
+                print(f"📊 处理统计: {all_stats['processed_conversations']}/{all_stats['total_conversations']} 个对话")
+                print(f"📊 存储统计:")
+                for key, value in all_stats["overall_storage_breakdown"].items():
+                    if value > 0:
+                        print(f"  - {key}: {value}")
+                
+                if all_stats["overall_qa_info"]["total_qa_pairs"] > 0:
+                    print(f"📋 QA测试集: {all_stats['overall_qa_info']['total_qa_pairs']} 个问答对")
+                
+                if all_stats["failed_conversations"]:
+                    print(f"❌ 失败的对话: {all_stats['failed_conversations']}")
+                
+                print(f"📂 统计文件: {args.output_dir}")
+                
+                # 可选：保存语义图谱
+                if args.save_graph:
+                    graph_path = Path(args.output_dir) / f"all_conversations_semantic_graph_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    storage.semantic_graph.save_graph(str(graph_path))
+                    print(f"💾 语义图谱已保存: {graph_path}")
+                
+            else:
+                print(f"🧪 [试运行] 将存储所有对话")
+                print(f"🧪 [试运行] 包含原始数据: {include_raw}")
+                print(f"🧪 [试运行] 包含抽取结果: {include_extracted}")
+                print(f"🧪 [试运行] QA处理: {'保留作为测试集' if skip_qa else '包含到语义图谱'}")
+        
+        logger.info("✅ 任务完成！")
+        
+    except KeyboardInterrupt:
+        logger.info("⏹️ 用户中断操作")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"❌ 执行失败: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
 # def main():
-#     """主函数 - 演示对话存储和查询"""
+#     """主函数 - 演示对话存储和QA测试集提取（适配新架构）"""
     
 #     # 1. 创建对话存储器
 #     storage = ConversationSemanticStorage()
@@ -1341,9 +1293,9 @@ class ConversationSemanticQuerier:
 #     conversations = storage.get_conversation_list()
 #     print(f"🔍 发现 {len(conversations)} 个对话: {conversations}")
     
-#     # 3. 存储指定对话
+#     # 3. 存储指定对话（不包括QA）
 #     test_conversation = "conv-26"
-#     print(f"\n🚀 存储对话 {test_conversation}")
+#     print(f"\n🚀 存储对话 {test_conversation} (不包括QA)")
     
 #     stats = storage.store_conversation(
 #         sample_id=test_conversation,
@@ -1353,153 +1305,52 @@ class ConversationSemanticQuerier:
     
 #     print(f"✅ {test_conversation} 存储完成！")
 #     print(f"存储统计: {stats['storage_breakdown']}")
+#     print(f"QA信息: {stats['qa_info']}")
 #     print(f"命名空间使用: {stats['namespace_usage']}")
     
-#     # 4. 创建查询器并测试
+#     # 4. 提取QA数据作为测试集
+#     print(f"\n📋 提取QA数据作为测试集...")
+#     qa_test_data = storage.get_qa_test_data([test_conversation])
+    
+#     if test_conversation in qa_test_data:
+#         qa_count = len(qa_test_data[test_conversation])
+#         print(f"📊 {test_conversation} 的QA测试集包含 {qa_count} 个问答对")
+        
+#         # 显示前几个QA样例
+#         for i, qa in enumerate(qa_test_data[test_conversation][:3]):
+#             category = qa.get('category', 'unknown')
+#             question = qa.get('question', 'N/A')[:50] + '...' if len(qa.get('question', '')) > 50 else qa.get('question', 'N/A')
+#             print(f"  QA[{i}] (cat-{category}): {question}")
+    
+#     # 5. 创建查询器并测试检索
+#     print(f"\n🔍 测试语义检索功能...")
 #     querier = ConversationSemanticQuerier(storage.semantic_graph)
     
-#     print(f"\n🔍 查询对话 {test_conversation}")
-    
-#     # 查询原始数据
-#     raw_results = querier.query_conversation(
+#     # 在原始数据中搜索
+#     search_results = querier.query_conversation(
 #         query_text="Caroline LGBTQ support",
 #         conversation_id=test_conversation,
 #         data_sources=["raw"],
 #         k=3
 #     )
     
-#     print(f"原始数据查询结果: {len(raw_results['results'])} 条")
-#     for result in raw_results['results'][:2]:
-#         print(f"- [{result['similarity_score']:.3f}] {result['data_type']}: {result['content'][:80]}...")
+#     print(f"原始数据检索结果: {len(search_results['results'])} 条")
+#     for i, result in enumerate(search_results['results'][:2]):
+#         content_preview = result['content'][:60] + '...' if len(result['content']) > 60 else result['content']
+#         print(f"  [{i}] [{result['similarity_score']:.3f}] {result['data_type']}: {content_preview}")
     
-#     # 查询抽取结果
-#     extracted_results = querier.query_conversation(
-#         query_text="Caroline",
-#         conversation_id=test_conversation,
-#         data_sources=["extracted"],
-#         data_types=["extracted_entity"],
-#         k=3
-#     )
+#     print(f"\n🎯 演示完成！")
+#     print(f"✅ 对话数据已存储到语义图谱（不包括QA）")
+#     print(f"✅ QA数据已准备好作为测试集使用")
     
-#     print(f"\n抽取结果查询: {len(extracted_results['results'])} 条")
-#     for result in extracted_results['results'][:2]:
-#         print(f"- [{result['similarity_score']:.3f}] {result['data_type']}: {result['content'][:80]}...")
-    
-#     print(f"\n🎯 演示特定对话存储和查询完成！")
-    
-#     # 5. 可选：存储所有对话
+#     # 6. 可选：存储所有对话
 #     choice = input("\n是否存储所有对话？(y/n): ")
 #     if choice.lower() == 'y':
-#         print("\n🚀 开始存储所有对话")
+#         print("\n🚀 开始存储所有对话（不包括QA）")
 #         all_stats = storage.store_all_conversations()
 #         print(f"✅ 所有对话存储完成！处理了 {all_stats['processed_conversations']}/{all_stats['total_conversations']} 个对话")
-#         print(f"总体存储统计: {all_stats['overall_storage_breakdown']}")
+#         print(f"📊 总体存储统计: {all_stats['overall_storage_breakdown']}")
+#         print(f"📋 总计QA测试集: {all_stats['overall_qa_info']['total_qa_pairs']} 个问答对")
 
-# 更新main函数
-def main():
-    """主函数 - 演示对话存储和QA测试集提取"""
-    
-    # 1. 创建对话存储器
-    storage = ConversationSemanticStorage()
-    
-    # 2. 获取可用对话列表
-    conversations = storage.get_conversation_list()
-    print(f"🔍 发现 {len(conversations)} 个对话: {conversations}")
-    
-    # 3. 存储指定对话（不包括QA）
-    test_conversation = "conv-26"
-    print(f"\n🚀 存储对话 {test_conversation} (不包括QA)")
-    
-    stats = storage.store_conversation(
-        sample_id=test_conversation,
-        include_raw=True,
-        include_extracted=True
-    )
-    
-    print(f"✅ {test_conversation} 存储完成！")
-    print(f"存储统计: {stats['storage_breakdown']}")
-    print(f"QA信息: {stats['qa_info']}")
-    print(f"命名空间使用: {stats['namespace_usage']}")
-    
-    # 4. 提取QA数据作为测试集
-    print(f"\n📋 提取QA数据作为测试集...")
-    qa_test_data = storage.get_qa_test_data([test_conversation])
-    
-    if test_conversation in qa_test_data:
-        qa_count = len(qa_test_data[test_conversation])
-        print(f"📊 {test_conversation} 的QA测试集包含 {qa_count} 个问答对")
-        
-        # 显示前几个QA样例
-        for i, qa in enumerate(qa_test_data[test_conversation][:3]):
-            category = qa.get('category', 'unknown')
-            question = qa.get('question', 'N/A')[:50] + '...' if len(qa.get('question', '')) > 50 else qa.get('question', 'N/A')
-            print(f"  QA[{i}] (cat-{category}): {question}")
-    
-    # 5. 创建查询器并测试检索
-    print(f"\n🔍 测试语义检索功能...")
-    querier = ConversationSemanticQuerier(storage.semantic_graph)
-    
-    # 在原始数据中搜索
-    search_results = querier.query_conversation(
-        query_text="Caroline LGBTQ support",
-        conversation_id=test_conversation,
-        data_sources=["raw"],
-        k=3
-    )
-    
-    print(f"原始数据检索结果: {len(search_results['results'])} 条")
-    for i, result in enumerate(search_results['results'][:2]):
-        content_preview = result['content'][:60] + '...' if len(result['content']) > 60 else result['content']
-        print(f"  [{i}] [{result['similarity_score']:.3f}] {result['data_type']}: {content_preview}")
-    
-    print(f"\n🎯 演示完成！")
-    print(f"✅ 对话数据已存储到语义图谱（不包括QA）")
-    print(f"✅ QA数据已准备好作为测试集使用")
-    
-    # 6. 可选：存储所有对话
-    choice = input("\n是否存储所有对话？(y/n): ")
-    if choice.lower() == 'y':
-        print("\n🚀 开始存储所有对话（不包括QA）")
-        all_stats = storage.store_all_conversations()
-        print(f"✅ 所有对话存储完成！处理了 {all_stats['processed_conversations']}/{all_stats['total_conversations']} 个对话")
-        print(f"📊 总体存储统计: {all_stats['overall_storage_breakdown']}")
-        print(f"📋 总计QA测试集: {all_stats['overall_qa_info']['total_qa_pairs']} 个问答对")
-
-if __name__ == "__main__":
-    main()
-
-# # 只存储原始数据
-# storage.store_conversation("conv-26", include_raw=True, include_extracted=False)
-
-# # 只存储抽取结果
-# storage.store_conversation("conv-26", include_raw=False, include_extracted=True)
-
-# # 存储两种数据
-# storage.store_conversation("conv-26", include_raw=True, include_extracted=True)
-
-# # 查询指定对话
-# querier.query_conversation(
-#     query_text="Caroline LGBTQ",
-#     conversation_id="conv-26",
-#     data_sources=["raw", "extracted"],
-#     k=5
-# )
-
-# # 查询所有对话
-# querier.query_all_conversations(
-#     query_text="LGBTQ support",
-#     data_sources=["raw"],
-#     k=5
-# )
-
-# 1. 存储特定对话
-storage = ConversationSemanticStorage()
-storage.store_conversation("conv-26")  # 只存储 conv-26
-
-# 2. 存储多个对话
-for conv_id in ["conv-26", "conv-30", "conv-41"]:
-    storage.store_conversation(conv_id)
-
-# # 3. 查询特定对话
-# querier = ConversationSemanticQuerier(storage.semantic_graph)
-# results = querier.query_conversation("Caroline", "conv-26")
+# if __name__ == "__main__":
+#     main()

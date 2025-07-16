@@ -14,7 +14,7 @@ from .milvus_operator import MilvusOperator
 
 class SemanticMap:
     """
-    语义地图 (SemanticMap) 负责存储内存单元及其向量嵌入，并支持基于相似度的搜索。
+    语义地图 (SemanticMap) 负责存储记忆单元及其向量嵌入，并支持基于相似度的搜索。
     它还管理记忆空间，允许在特定上下文中进行操作。
     类似于一个向量数据库。
     """
@@ -94,6 +94,7 @@ class SemanticMap:
                 base_index_type = self.faiss_index_type.split("IDMap,", 1)[1]
                 base_index = faiss.index_factory(self.embedding_dim, base_index_type)
                 self.faiss_index = faiss.IndexIDMap(base_index)
+                logging.info(f"已创建 IndexIDMap 索引，基础类型: {base_index_type}")
             else:
                 self.faiss_index = faiss.index_factory(
                     self.embedding_dim, self.faiss_index_type
@@ -106,6 +107,148 @@ class SemanticMap:
             logging.error(f"初始化 FAISS 索引 '{self.faiss_index_type}' 失败: {e}")
             self.faiss_index = None  # 确保索引在失败时为None
             raise
+    
+    # TODO:有改动，建议同步到hippo
+    def build_index(self):
+        """
+        根据当前所有具有有效嵌入的记忆单元构建（或重建）FAISS索引。
+        并递归为所有MemorySpace及其子空间建立索引。
+        修复IndexIDMap的使用问题。
+        """
+        if not self.memory_units:
+            logging.info("没有记忆单元可用于构建索引。")
+            if self.faiss_index:
+                self.faiss_index.reset()  # 清空现有索引
+            self._uid_to_internal_faiss_id.clear()
+            self._internal_faiss_id_counter = 0
+            return
+
+        valid_embeddings: List[np.ndarray] = []
+        internal_faiss_ids_for_index: List[int] = []
+
+        # 重置映射和计数器，因为我们要重建
+        self._uid_to_internal_faiss_id.clear()
+
+        current_internal_id = 0
+        for uid, unit in self.memory_units.items():
+            if (
+                unit.embedding is not None
+                and unit.embedding.shape[0] == self.embedding_dim
+            ):
+                valid_embeddings.append(unit.embedding)
+                # 分配一个新的内部FAISS ID
+                self._uid_to_internal_faiss_id[uid] = current_internal_id
+                internal_faiss_ids_for_index.append(current_internal_id)
+                current_internal_id += 1
+            else:
+                logging.debug(
+                    f"记忆单元 '{uid}' 没有有效向量，将不被包含在FAISS索引中。"
+                )
+
+        if not valid_embeddings:
+            logging.info("没有有效的嵌入可用于构建FAISS索引。")
+            if self.faiss_index:
+                self.faiss_index.reset()
+            return
+
+        embeddings_np = np.array(valid_embeddings).astype(np.float32)
+        ids_np = np.array(internal_faiss_ids_for_index, dtype=np.int64)
+
+        # 重新初始化FAISS索引以确保它是干净的
+        self._init_faiss_index()
+        if not self.faiss_index:  # 如果初始化失败
+            logging.error("FAISS索引未初始化，无法构建。")
+            return
+
+        # 如果索引类型需要训练 (例如 IVF 系列)
+        if "IVF" in self.faiss_index_type and not self.faiss_index.is_trained:
+            logging.info(f"正在训练FAISS索引 ('{self.faiss_index_type}')...")
+            if embeddings_np.shape[0] < getattr(self.faiss_index, "nlist", 1):
+                logging.warning(
+                    f"训练数据太少 ({embeddings_np.shape[0]} 个向量) 对于 IVF 索引。可能导致错误或性能不佳。"
+                )
+            if embeddings_np.shape[0] > 0:
+                self.faiss_index.train(embeddings_np)
+                logging.info("FAISS索引训练完成。")
+            else:
+                logging.error("没有数据用于训练FAISS索引。")
+                return
+
+        # 根据索引类型选择添加方法
+        if self.faiss_index_type.startswith("IDMap,"):
+            # IndexIDMap必须使用add_with_ids
+            self.faiss_index.add_with_ids(embeddings_np, ids_np)
+            logging.info(f"使用 add_with_ids 添加了 {len(embeddings_np)} 个向量到 IndexIDMap")
+        else:
+            # 普通索引使用add
+            self.faiss_index.add(embeddings_np)
+            logging.info(f"使用 add 添加了 {len(embeddings_np)} 个向量到索引")
+
+        logging.info(
+            f"FAISS索引已成功构建/重建。包含 {self.faiss_index.ntotal} 个向量。"
+        )
+        # 更新内部ID计数器
+        self._internal_faiss_id_counter = current_internal_id
+
+        # 递归为所有MemorySpace及其子空间建立索引
+        def _recursive_build_index(space: MemorySpace):
+            try:
+                space.build_index(embedding_dim=self.embedding_dim)
+                semantic_map = space._get_semantic_map()
+                for child_space_name in space.get_child_space_names():
+                    child_space = semantic_map.memory_spaces.get(child_space_name)
+                    if child_space:
+                        _recursive_build_index(child_space)
+            except Exception as e:
+                logging.warning(f"递归为MemorySpace '{space.name}' 建立索引时出错: {e}")
+
+        for space in self.memory_spaces.values():
+            _recursive_build_index(space)
+
+    # def _init_faiss_index(self):
+    #     """初始化或重新初始化 FAISS 索引。"""
+    #     try:
+    #         if self.faiss_index_type.startswith("IDMap,"):
+    #             if not hasattr(faiss, "IndexIDMap"):
+    #                 raise ImportError("FAISS 版本不支持 IndexIDMap")
+    #             base_index_type = self.faiss_index_type.split("IDMap,", 1)[1]
+    #             base_index = faiss.index_factory(self.embedding_dim, base_index_type)
+    #             self.faiss_index = faiss.IndexIDMap(base_index)
+    #         else:
+    #             self.faiss_index = faiss.index_factory(
+    #                 self.embedding_dim, self.faiss_index_type
+    #             )
+
+    #         logging.info(
+    #             f"FAISS 索引 '{self.faiss_index_type}' 已初始化。总向量数: {self.faiss_index.ntotal if self.faiss_index else 0}"
+    #         )
+    #     except Exception as e:
+    #         logging.error(f"初始化 FAISS 索引 '{self.faiss_index_type}' 失败: {e}")
+    #         self.faiss_index = None  # 确保索引在失败时为None
+    #         raise
+
+
+    # def _init_faiss_index(self):
+    #     """初始化或重新初始化 FAISS 索引。"""
+    #     try:
+    #         if self.faiss_index_type.startswith("IDMap,"):
+    #             if not hasattr(faiss, "IndexIDMap"):
+    #                 raise ImportError("FAISS 版本不支持 IndexIDMap")
+    #             base_index_type = self.faiss_index_type.split("IDMap,", 1)[1]
+    #             base_index = faiss.index_factory(self.embedding_dim, base_index_type)
+    #             self.faiss_index = faiss.IndexIDMap(base_index)
+    #         else:
+    #             self.faiss_index = faiss.index_factory(
+    #                 self.embedding_dim, self.faiss_index_type
+    #             )
+
+    #         logging.info(
+    #             f"FAISS 索引 '{self.faiss_index_type}' 已初始化。总向量数: {self.faiss_index.ntotal if self.faiss_index else 0}"
+    #         )
+    #     except Exception as e:
+    #         logging.error(f"初始化 FAISS 索引 '{self.faiss_index_type}' 失败: {e}")
+    #         self.faiss_index = None  # 确保索引在失败时为None
+    #         raise
 
     ### 嵌入生成函数
 
@@ -150,7 +293,7 @@ class SemanticMap:
         content_type: Optional[str] = None,
     ) -> Optional[np.ndarray]:
         """
-        为内存单元生成嵌入向量。
+        为记忆单元生成嵌入向量。
         """
         embedding = None
         if explicit_content and content_type:
@@ -201,7 +344,7 @@ class SemanticMap:
 
     def add_unit_to_space(self, unit_or_uid: Union[str, MemoryUnit], space_name: str):
         """
-        智能将内存单元添加到记忆空间：自动判断输入是UID字符串还是MemoryUnit对象
+        智能将记忆单元添加到记忆空间：自动判断输入是UID字符串还是MemoryUnit对象
         """
         if isinstance(unit_or_uid, str):
             uid = unit_or_uid
@@ -213,7 +356,7 @@ class SemanticMap:
             )
 
         if uid not in self.memory_units:
-            logging.warning(f"尝试将不存在的内存单元 '{uid}' 添加到空间 '{space_name}'")
+            logging.warning(f"尝试将不存在的记忆单元 '{uid}' 添加到空间 '{space_name}'")
             return
 
         space = self.create_memory_space(space_name)  # 如果空间不存在则创建
@@ -223,7 +366,7 @@ class SemanticMap:
         self, unit_or_uid: Union[str, MemoryUnit], space_name: str
     ):
         """
-        智能从记忆空间移除内存单元：自动判断输入类型
+        智能从记忆空间移除记忆单元：自动判断输入类型
         """
         if isinstance(unit_or_uid, str):
             uid = unit_or_uid
@@ -627,7 +770,7 @@ class SemanticMap:
         return None
 
     # ==============================
-    # 内存单元操作函数（更新兼容性）
+    # 记忆单元操作函数（更新兼容性）
     # ==============================
 
     def add_unit(
@@ -639,11 +782,18 @@ class SemanticMap:
         rebuild_index_immediately: bool = False,
     ):
         """
-        向语义地图添加一个新的内存单元。
+        向语义地图添加一个新的记忆单元。
         """
         if not isinstance(unit, MemoryUnit):
             logging.error("尝试添加的不是 MemoryUnit 对象。")
             return
+
+        # 新增：去重逻辑
+        if unit.uid in self.memory_units:
+            existing = self.memory_units[unit.uid]
+            if existing == unit:
+                logging.info(f"记忆单元 '{unit.uid}' 已存在且内容一致，跳过添加。")
+                return
 
         # 检查内存限制，必要时触发换页
         if len(self.memory_units) >= self._max_memory_units:
@@ -675,13 +825,13 @@ class SemanticMap:
 
         if new_embedding is None:
             logging.warning(
-                f"未能为内存单元 '{unit.uid}' 生成嵌入。该单元将被添加，但无法用于相似性搜索。"
+                f"未能为记忆单元 '{unit.uid}' 生成嵌入。该单元将被添加，但无法用于相似性搜索。"
             )
         unit.embedding = new_embedding
 
         # 添加到内存
         self.memory_units[unit.uid] = unit
-        logging.info(f"内存单元 '{unit.uid}' 已添加/更新到 SemanticMap。")
+        logging.info(f"记忆单元 '{unit.uid}' 已添加/更新到 SemanticMap。")
 
         # 添加到指定空间
         if space_names:
@@ -732,7 +882,7 @@ class SemanticMap:
         return None
 
     def delete_unit(self, uid: str, rebuild_index_immediately: bool = False):
-        """从语义地图中删除一个内存单元"""
+        """从语义地图中删除一个记忆单元"""
         if uid in self.memory_units:
             del self.memory_units[uid]
 
@@ -749,16 +899,16 @@ class SemanticMap:
                         self.faiss_index.remove_ids(
                             np.array([internal_id_to_remove], dtype=np.int64)
                         )
-                        logging.debug(f"内存单元 '{uid}' 已从FAISS索引中移除")
+                        logging.debug(f"记忆单元 '{uid}' 已从FAISS索引中移除")
                     del self._uid_to_internal_faiss_id[uid]
                 except Exception as e:
                     logging.error(f"从FAISS索引中移除单元 '{uid}' 失败: {e}")
 
-            logging.info(f"内存单元 '{uid}' 已从 SemanticMap 删除")
+            logging.info(f"记忆单元 '{uid}' 已从 SemanticMap 删除")
             if rebuild_index_immediately:
                 self.build_index()
         else:
-            logging.warning(f"尝试删除不存在的内存单元ID '{uid}'")
+            logging.warning(f"尝试删除不存在的记忆单元ID '{uid}'")
 
         # 添加到删除跟踪
         self._deleted_units.add(uid)
@@ -884,6 +1034,7 @@ class SemanticMap:
     def _expand_to_units(self, obj) -> List[MemoryUnit]:
         """
         辅助方法：将MemorySpace、MemoryUnit列表、UID列表等统一展开为MemoryUnit列表。
+        支持字符串"ms:xxx"作为MemorySpace引用。
         """
         result = []
         if obj is None:
@@ -891,12 +1042,18 @@ class SemanticMap:
         if isinstance(obj, MemoryUnit):
             result.append(obj)
         elif isinstance(obj, str):
-            # 视为UID
-            u = self.memory_units.get(obj)
-            if u:
-                result.append(u)
+            if obj.startswith("ms:"):
+                ms_name = obj[3:]
+                ms = self.memory_spaces.get(ms_name)
+                if ms:
+                    result.extend(ms.get_all_units())
+            else:
+                # 视为MemoryUnit的uid
+                u = self.memory_units.get(obj)
+                if u:
+                    result.append(u)
         elif hasattr(obj, "get_all_units"):
-            # MemorySpace
+            # MemorySpace对象
             result.extend(obj.get_all_units())
         elif isinstance(obj, (list, set, tuple)):
             for item in obj:
@@ -909,11 +1066,11 @@ class SemanticMap:
 
     def build_index(self):
         """
-        根据当前所有具有有效嵌入的内存单元构建（或重建）FAISS索引。
+        根据当前所有具有有效嵌入的记忆单元构建（或重建）FAISS索引。
         并递归为所有MemorySpace及其子空间建立索引。
         """
         if not self.memory_units:
-            logging.info("没有内存单元可用于构建索引。")
+            logging.info("没有记忆单元可用于构建索引。")
             if self.faiss_index:
                 self.faiss_index.reset()  # 清空现有索引
             self._uid_to_internal_faiss_id.clear()
@@ -939,7 +1096,7 @@ class SemanticMap:
                 current_internal_id += 1
             else:
                 logging.debug(
-                    f"内存单元 '{uid}' 没有有效向量，将不被包含在FAISS索引中。"
+                    f"记忆单元 '{uid}' 没有有效向量，将不被包含在FAISS索引中。"
                 )
 
         if not valid_embeddings:
@@ -1001,7 +1158,7 @@ class SemanticMap:
         candidate_uids: Optional[List[str]] = None,
     ) -> List[Tuple[MemoryUnit, float]]:
         """
-        通过查询向量在语义地图中搜索相似的内存单元。
+        通过查询向量在语义地图中搜索相似的记忆单元。
 
         参数:
             query_embedding (np.ndarray): 查询向量
@@ -1080,19 +1237,27 @@ class SemanticMap:
         # 多个空间，使用暴力搜索
         return "brute_force"
 
+    def add_ms_prefix(self, names):
+        if not names:
+            return []
+        return [n if n.startswith("ms:") else f"ms:{n}" for n in names]
+
     def _get_candidate_uids_set(
         self, ms_names: Optional[List[str]], candidate_uids: Optional[List[str]]
     ) -> Set[str]:
         """
         获取候选单元UID集合，支持空间、UID列表的并集/交集，利用集合操作接口简化逻辑。
+        自动为空间名添加ms:前缀。
         """
         # 同时指定ms_names和candidate_uids，取交集
         if ms_names and candidate_uids:
-            units = self.units_intersection(ms_names, candidate_uids)
+            ms_names_prefixed = self.add_ms_prefix(ms_names)
+            units = self.units_intersection(ms_names_prefixed, candidate_uids)
             return set(u.uid for u in units)
         # 只指定ms_names，取并集
         elif ms_names:
-            units = self.units_union(*ms_names)
+            ms_names_prefixed = self.add_ms_prefix(ms_names)
+            units = self.units_union(*ms_names_prefixed)
             return set(u.uid for u in units)
         # 只指定candidate_uids
         elif candidate_uids:
@@ -1177,9 +1342,9 @@ class SemanticMap:
                 if indices[0][i] == -1:
                     continue
 
-                unit = space._index_to_uid.get(idx)
-                if unit:
-                    memory_unit = self.get_unit(unit)
+                unit_uid = space._index_to_uid.get(idx)
+                if unit_uid:
+                    memory_unit = self.get_unit(unit_uid)
                     if memory_unit:
                         results.append((memory_unit, float(distances[0][i])))
 
@@ -1245,9 +1410,9 @@ class SemanticMap:
         distances: np.ndarray,
         internal_faiss_indices: np.ndarray,
         candidate_uids_set: Set[str],
-    ) -> List[Tuple[MemoryUnit, float]]:
+    ) -> List[MemoryUnit]:
         """处理搜索结果，过滤并返回有效的MemoryUnit"""
-        results: List[Tuple[MemoryUnit, float]] = []
+        results: List[MemoryUnit] = []
         internal_id_to_uid_map = {
             v: k for k, v in self._uid_to_internal_faiss_id.items()
         }
@@ -1261,10 +1426,10 @@ class SemanticMap:
             if uid and uid in candidate_uids_set:
                 unit = self.get_unit(uid)
                 if unit:
-                    results.append((unit, float(distances[0, i])))
+                    results.append(unit)
                 else:
                     logging.warning(
-                        f"在FAISS搜索结果中找到内部ID {internal_id}，但在内存单元字典中找不到对应的单元ID '{uid}'。"
+                        f"在FAISS搜索结果中找到内部ID {internal_id}，但在记忆单元字典中找不到对应的单元ID '{uid}'。"
                     )
             else:
                 logging.debug(
@@ -1484,7 +1649,7 @@ class SemanticMap:
         collection_name: str = "hippo_memory_units",
     ) -> bool:
         """
-        将SemanticMap中的内存单元导出到Milvus数据库
+        将SemanticMap中的记忆单元导出到Milvus数据库
         注意：此方法已废弃，推荐使用 sync_to_external() 方法
         """
         logging.warning(
@@ -1511,7 +1676,7 @@ class SemanticMap:
                 logging.error("创建Milvus集合失败，无法导出数据")
                 return False
 
-            # 导出所有内存单元
+            # 导出所有记忆单元
             success_count = 0
             for uid, unit in self.memory_units.items():
                 # 查找单元所属的所有空间
@@ -1524,10 +1689,10 @@ class SemanticMap:
                 if milvus_op.add_unit(unit, space_names):
                     success_count += 1
                 else:
-                    logging.warning(f"导出内存单元 '{uid}' 到Milvus失败")
+                    logging.warning(f"导出记忆单元 '{uid}' 到Milvus失败")
 
             logging.info(
-                f"成功导出 {success_count}/{len(self.memory_units)} 个内存单元到Milvus"
+                f"成功导出 {success_count}/{len(self.memory_units)} 个记忆单元到Milvus"
             )
             milvus_op.close()
 
@@ -1545,13 +1710,13 @@ class SemanticMap:
         recursive: bool = True,
     ) -> List[MemoryUnit]:
         """
-        过滤内存单元，支持多种过滤条件和空间集合操作。
+        过滤记忆单元，支持多种过滤条件和空间集合操作。
         """
         # 优先用集合操作获取候选单元
         if candidate_units is not None:
             units = self.units_union(candidate_units)
         elif ms_names:
-            units = self.units_union(*ms_names)
+            units = self.units_union(*self.add_ms_prefix(ms_names))
         else:
             units = list(self.memory_units.values())
 
@@ -1586,3 +1751,13 @@ class SemanticMap:
             return True
 
         return [u for u in units if match(u)]
+
+    def add_memory_space(self, space: "MemorySpace"):
+        """
+        将一个已创建的 MemorySpace 对象挂载到 SemanticMap 下，并自动设置引用。
+        如果同名空间已存在，则覆盖。
+        """
+        if not isinstance(space, MemorySpace):
+            raise TypeError("参数必须是 MemorySpace 实例")
+        space._set_semantic_map_ref(self)
+        self.memory_spaces[space.name] = space

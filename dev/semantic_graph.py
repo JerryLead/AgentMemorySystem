@@ -15,7 +15,7 @@ from .memory_space import MemorySpace
 class SemanticGraph:
     """
     语义图谱 (SemanticGraph) 结合了 SemanticMap 的向量存储/搜索能力和 NetworkX 的图结构管理能力。
-    它存储内存单元作为节点，并允许在它们之间定义显式的命名关系。
+    它存储记忆单元作为节点，并允许在它们之间定义显式的命名关系。
     查询可以利用显式图遍历和隐式语义相似性。
     """
 
@@ -32,6 +32,7 @@ class SemanticGraph:
         self.nx_graph: nx.DiGraph = (
             nx.DiGraph()
         )  # 使用 NetworkX有向图存储节点和显式关系
+        self.rel_types: Set[str] = set()  # 存储所有已注册的关系类型
         logging.info("SemanticGraph 已初始化。")
 
         # 添加Neo4j连接跟踪
@@ -40,8 +41,8 @@ class SemanticGraph:
             set()
         )  # 修改过的关系 (source_id, target_id, rel_type)
         self._deleted_relationships = set()  # 删除的关系
-        self._modified_units = set()  # 修改过的内存单元
-        self._deleted_units = set()  # 删除的内存单元
+        self._modified_units = set()  # 修改过的记忆单元
+        self._deleted_units = set()  # 删除的记忆单元
 
         # 内存管理配置
         self._max_nodes_in_memory = 10000  # 内存中最大节点数
@@ -61,13 +62,13 @@ class SemanticGraph:
         self,
         uri: str = "bolt://localhost:7687",
         user: str = "neo4j",
-        password: str = "password",
+        password: str = "k4s9k4s9",
         database: str = "neo4j",
         # Milvus连接参数
         milvus_host: str = "localhost",
         milvus_port: str = "19530",
-        milvus_user: str = "neo4j",
-        milvus_password: str = "k4s9k4s9",
+        milvus_user: str = "",
+        milvus_password: str = "",
         milvus_collection: str = "hippo_memory_units",
     ) -> bool:
         """
@@ -116,7 +117,7 @@ class SemanticGraph:
         rebuild_semantic_map_index_immediately: bool = False,
     ):
         """
-        向图谱添加一个内存单元 (节点)。
+        向图谱添加一个记忆单元 (节点)。
         单元也会被添加到内部的 SemanticMap 中。
         """
         # 检查内存限制，必要时触发换页
@@ -177,7 +178,7 @@ class SemanticGraph:
         **kwargs: Any,
     ):
         """
-        在两个已存在的内存单元 (节点) 或 MemorySpace 之间添加一条显式关系 (边)。
+        在两个已存在的记忆单元 (节点) 或 MemorySpace 之间添加一条显式关系 (边)。
         支持 MemoryUnit <-> MemoryUnit, MemorySpace <-> MemorySpace, MemoryUnit <-> MemorySpace。
         """
 
@@ -256,10 +257,18 @@ class SemanticGraph:
                     )
 
         # 添加关系到NetworkX图
+        # 只保留GML支持的属性类型
+        def filter_gml_attrs(attrs):
+            return {
+                k: (str(v) if not isinstance(v, (str, int, float, bool)) else v)
+                for k, v in attrs.items()
+                if v is not None
+            }
+
         edge_attributes = {
             "type": relationship_name,
             "created": str(datetime.now()),
-            **kwargs,
+            **filter_gml_attrs(kwargs),
         }
         self.nx_graph.add_edge(src_id, tgt_id, **edge_attributes)
 
@@ -268,6 +277,9 @@ class SemanticGraph:
 
         # 记录修改
         self._modified_relationships.add((src_id, tgt_id, relationship_name))
+
+        # 记录关系类型
+        self.rel_types.add(relationship_name)
 
         logging.info(
             f"已添加从 '{src_id}' 到 '{tgt_id}' 的关系 '{relationship_name}'。"
@@ -283,11 +295,79 @@ class SemanticGraph:
             )
 
         return True
+    
+    # TODO:有改动，建议同步到Hippo
+    def get_relationship(self, source_uid: str, target_uid: str, relationship_type: str) -> Optional[Dict[str, Any]]:
+        """
+        检查两个节点之间是否存在指定类型的关系，并返回关系属性
+        
+        Args:
+            source_uid: 源节点UID
+            target_uid: 目标节点UID
+            relationship_type: 关系类型
+            
+        Returns:
+            关系属性字典，如果关系不存在则返回None
+        """
+        try:
+            # 首先检查内存中的关系缓存
+            rel_key = (source_uid, target_uid, relationship_type)
+            if rel_key in self._relationship_cache:
+                # 更新访问统计
+                self._relationships_access_counts[rel_key] = self._relationships_access_counts.get(rel_key, 0) + 1
+                self._relationships_last_accessed[rel_key] = datetime.now().timestamp()
+                return self._relationship_cache[rel_key]
+            
+            # 检查NetworkX图中是否存在该关系
+            if self.nx_graph.has_edge(source_uid, target_uid):
+                edge_data = self.nx_graph.get_edge_data(source_uid, target_uid)
+                if edge_data and edge_data.get("type") == relationship_type:
+                    # 提取关系属性（排除系统字段）
+                    relationship_properties = {
+                        k: v for k, v in edge_data.items() 
+                        if k not in ["type", "created", "updated"]
+                    }
+                    
+                    # 添加到缓存
+                    self.swap_in_relationship(source_uid, target_uid, relationship_type, relationship_properties)
+                    
+                    return relationship_properties
+            
+            # 如果内存中没有，尝试从Neo4j加载
+            if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
+                try:
+                    relationship_data = self._neo4j_connection.get_relationship(
+                        source_uid, target_uid, relationship_type
+                    )
+                    if relationship_data:
+                        # 添加到内存缓存
+                        self.swap_in_relationship(source_uid, target_uid, relationship_type, relationship_data)
+                        
+                        # 如果NetworkX图中没有这个关系，也添加进去
+                        if not self.nx_graph.has_edge(source_uid, target_uid):
+                            edge_attributes = {
+                                "type": relationship_type,
+                                "loaded_from_neo4j": str(datetime.now()),
+                                **{k: (str(v) if not isinstance(v, (str, int, float, bool)) else v)
+                                for k, v in relationship_data.items() if v is not None}
+                            }
+                            self.nx_graph.add_edge(source_uid, target_uid, **edge_attributes)
+                        
+                        return relationship_data
+                except Exception as e:
+                    logging.warning(f"从Neo4j加载关系失败: {e}")
+            
+            # 关系不存在
+            return None
+            
+        except Exception as e:
+            logging.error(f"检查关系失败 ({source_uid} -[{relationship_type}]-> {target_uid}): {e}")
+            return None
 
     def delete_unit(
         self, uid: str, rebuild_semantic_map_index_immediately: bool = False
     ):
-        """从图谱和底层的 SemanticMap 中删除一个内存单元及其所有相关关系。"""
+        """从图谱和底层的 SemanticMap 中删除一个记忆单元及其所有相关关系。"""
         # 1. 从 SemanticMap 删除
         self.semantic_map.delete_unit(
             uid, rebuild_index_immediately=rebuild_semantic_map_index_immediately
@@ -391,6 +471,7 @@ class SemanticGraph:
 
         logging.warning(f"节点 '{uid}' 在内存和外部存储中均不存在")
         return None
+    
 
     # ==============================
     # 新增方法：兼容新的 MemorySpace 架构
@@ -401,74 +482,56 @@ class SemanticGraph:
         return self.semantic_map.create_memory_space(space_name)
 
     def add_unit_to_space_in_map(self, unit_or_uid, space_name: str):
-        """将一个内存单元添加到 SemanticMap 中的指定记忆空间。"""
+        """将一个记忆单元添加到 SemanticMap 中的指定记忆空间。"""
         self.semantic_map.add_unit_to_space(unit_or_uid, space_name)
 
     def remove_unit_from_space_in_map(self, unit_or_uid, space_name: str):
-        """从 SemanticMap 中的指定记忆空间移除一个内存单元。"""
+        """从 SemanticMap 中的指定记忆空间移除一个记忆单元。"""
         self.semantic_map.remove_unit_from_space(unit_or_uid, space_name)
 
     def get_units_in_memory_space(
         self, ms_names, recursive: bool = True
     ) -> List[MemoryUnit]:
-        """获取指定记忆空间中的所有单元"""
-        return self.semantic_map.get_units_in_memory_space(ms_names, recursive)
+        # 支持ms_names为["ms:xxx", ...]格式
+        if isinstance(ms_names, str):
+            ms_names = [ms_names]
+        normed = []
+        for name in ms_names:
+            if name.startswith("ms:"):
+                normed.append(name[3:])
+            else:
+                normed.append(name)
+        return self.semantic_map.get_units_in_memory_space(normed, recursive=recursive)
 
     def search_similarity_in_graph(
         self,
         query_text: Optional[str] = None,
         query_embedding: Optional[np.ndarray] = None,
         query_image_path: Optional[str] = None,
-        k: int = 5,
+        top_k: int = 5,
         ms_names: Optional[List[str]] = None,
         recursive: bool = True,
-    ) -> List[Tuple[MemoryUnit, float]]:
-        """
-        在图谱中执行语义相似性搜索，兼容新的 MemorySpace 架构
-        """
-        # 如果指定了 ms_names，使用新的搜索方法
+    ):
+        normed = None
         if ms_names:
-            if query_text:
-                return self.semantic_map.search_similarity_units(
-                    query_text, k, ms_names, recursive
-                )
-            else:
-                # 对于非文本查询，先在指定空间获取单元，然后进行搜索
-                units = self.get_units_in_memory_space(ms_names, recursive)
-                if not units:
-                    return []
-
-                # 构建候选单元UID列表
-                candidate_uids = [unit.uid for unit in units]
-
-                # 执行搜索
-                if query_embedding is not None:
-                    return self.semantic_map.search_similarity_by_vector(
-                        query_embedding, k, ms_names, candidate_uids
-                    )
-                elif query_image_path is not None:
-                    return self.semantic_map.search_similarity_by_image(
-                        query_image_path, k, ms_names, candidate_uids
-                    )
+            normed = [(n[3:] if n.startswith("ms:") else n) for n in ms_names]
+        if query_text is not None:
+            return self.semantic_map.search_similarity_by_text(
+                query_text, top_k, normed
+            )
+        elif query_embedding is not None:
+            return self.semantic_map.search_similarity_by_vector(
+                query_embedding, top_k, normed
+            )
+        elif query_image_path is not None:
+            return self.semantic_map.search_similarity_by_image(
+                query_image_path, top_k, normed
+            )
         else:
-            # 使用原有的搜索方法
-            if query_embedding is not None:
-                return self.semantic_map.search_similarity_by_vector(
-                    query_embedding, k, ms_names
-                )
-            elif query_text is not None:
-                return self.semantic_map.search_similarity_by_text(
-                    query_text, k, ms_names
-                )
-            elif query_image_path is not None:
-                return self.semantic_map.search_similarity_by_image(
-                    query_image_path, k, ms_names
-                )
-
-        logging.warning(
-            "必须提供 query_text, query_embedding 或 query_image_path 之一进行相似性搜索。"
-        )
-        return []
+            logging.warning(
+                "必须提供 query_text, query_embedding 或 query_image_path 之一进行相似性搜索。"
+            )
+            return []
 
     # ==============================
     # 内存管理和换页策略（保持原有功能）
@@ -860,12 +923,18 @@ class SemanticGraph:
     # ==============================
 
     def get_unit_data(self, uid: str) -> Optional[MemoryUnit]:
-        """从底层的 SemanticMap 检索内存单元对象。"""
+        """从底层的 SemanticMap 检索记忆单元对象。"""
         return self.get_unit(uid)
 
     def build_semantic_map_index(self):
         """构建底层 SemanticMap 的 FAISS 索引。"""
         self.semantic_map.build_index()
+
+    def get_all_relations(self) -> List[str]:
+        """
+        返回所有已注册的显式关系类型列表。
+        """
+        return list(self.rel_types)
 
     def traverse_explicit_nodes(
         self,
@@ -930,7 +999,11 @@ class SemanticGraph:
         # 根据 ms_names 过滤 (如果提供)
         if ms_names:
             ms_units = set()
-            for space_name in ms_names:
+            for name in ms_names:
+                if name.startswith("ms:"):
+                    space_name = name[3:]
+                else:
+                    space_name = name
                 space = self.semantic_map.get_memory_space(space_name)
                 if space:
                     space_uids = space.get_all_unit_uids(recursive=True)
@@ -958,10 +1031,13 @@ class SemanticGraph:
             logging.warning(f"节点 '{uid}' 不存在或没有向量，无法进行隐式遍历。")
             return []
 
+        normed = None
+        if ms_names:
+            normed = [(n[3:] if n.startswith("ms:") else n) for n in ms_names]
         similar_units_with_scores = self.semantic_map.search_similarity_by_vector(
             start_unit.embedding,
             k=k + 1,  # 获取稍多一些，以防 uid 是最相似的
-            ms_names=ms_names,
+            ms_names=normed,
         )
 
         results: List[Tuple[MemoryUnit, float]] = []
@@ -993,7 +1069,7 @@ class SemanticGraph:
         summary = (
             f"--- SemanticGraph 摘要 ---\n"
             f"SemanticMap:\n"
-            f"  - 内存单元总数: {num_map_units}\n"
+            f"  - 记忆单元总数: {num_map_units}\n"
             f"  - 已索引向量数: {num_map_indexed}\n"
             f"  - 记忆空间数: {num_map_spaces} ({list(self.semantic_map.memory_spaces.keys())})\n"
             f"NetworkX Graph:\n"
@@ -1042,10 +1118,14 @@ class SemanticGraph:
         ms_names: Optional[List[str]] = None,
         recursive: bool = True,
     ) -> List[MemoryUnit]:
+        # 支持ms_names为["ms:xxx", ...]格式
+        normed = None
+        if ms_names:
+            normed = [(n[3:] if n.startswith("ms:") else n) for n in ms_names]
         return self.semantic_map.filter_memory_units(
             candidate_units=candidate_units,
             filter_condition=filter_condition,
-            ms_names=ms_names,
+            ms_names=normed,
             recursive=recursive,
         )
 
@@ -1248,6 +1328,12 @@ class SemanticGraph:
                 logging.warning(f"加载内存管理状态失败: {e}")
 
         logging.info(f"SemanticGraph 已从目录 '{directory_path}' 加载。")
+        # 自动恢复 rel_types
+        instance.rel_types = set()
+        for _, _, data in instance.nx_graph.edges(data=True):
+            rel_type = data.get("type")
+            if rel_type:
+                instance.rel_types.add(rel_type)
         return instance
 
     # ==============================
@@ -1281,13 +1367,13 @@ class SemanticGraph:
                 logging.error("连接Neo4j失败，无法导出数据")
                 return False
 
-            # 导出所有内存单元
+            # 导出所有记忆单元
             unit_success_count = 0
             for uid, unit in self.semantic_map.memory_units.items():
                 if neo4j_op.add_unit(unit):
                     unit_success_count += 1
                 else:
-                    logging.warning(f"导出内存单元 '{uid}' 到Neo4j失败")
+                    logging.warning(f"导出记忆单元 '{uid}' 到Neo4j失败")
 
             # 导出所有关系
             rel_success_count = 0
@@ -1305,7 +1391,7 @@ class SemanticGraph:
                     )
 
             logging.info(
-                f"成功导出 {unit_success_count}/{len(self.semantic_map.memory_units)} 个内存单元和 {rel_success_count}/{self.nx_graph.number_of_edges()} 个关系到Neo4j"
+                f"成功导出 {unit_success_count}/{len(self.semantic_map.memory_units)} 个记忆单元和 {rel_success_count}/{self.nx_graph.number_of_edges()} 个关系到Neo4j"
             )
             neo4j_op.close()
 
@@ -1339,3 +1425,8 @@ class SemanticGraph:
         counter = Counter(memory_units)
         return dict(counter)
 
+    def add_memory_space_in_map(self, space: "MemorySpace"):
+        """
+        委托到底层SemanticMap，将MemorySpace对象注册到SemanticMap下。
+        """
+        return self.semantic_map.add_memory_space(space)

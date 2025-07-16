@@ -8,3 +8,5 @@ outdate/
 */results/
 */conversation_semantic_storage/
 benchmark/scripts/env.sh
+meeting_data/
+meeting_frontend_data/

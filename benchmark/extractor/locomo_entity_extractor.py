@@ -515,8 +515,9 @@ class LoCoMoEntityExtractor:
             "keywords_count": len(content_keywords)
         }
     
+    # 修复 _export_detailed_analysis 方法中的空间访问
     def _export_detailed_analysis(self, graph: SemanticGraph, output_dir: Path, sample_id: str):
-        """导出详细的实体和关系分析"""
+        """导出详细的实体和关系分析 - 修复版本"""
         
         analysis = {
             "sample_id": sample_id,
@@ -532,7 +533,8 @@ class LoCoMoEntityExtractor:
             entity_details = []
             entity_type_counts = {}
             
-            for uid in entity_space.get_memory_uids():
+            # 修复：使用get_unit_uids()而不是get_memory_uids()
+            for uid in entity_space.get_unit_uids():
                 unit = graph.get_unit(uid)
                 if unit:
                     entity_type = unit.raw_data.get('entity_type', 'Unknown')
@@ -584,13 +586,25 @@ class LoCoMoEntityExtractor:
         }
         
         # 网络分析
-        analysis["network_analysis"] = {
-            "graph_density": nx.density(graph.nx_graph),
-            "number_of_nodes": graph.nx_graph.number_of_nodes(),
-            "number_of_edges": graph.nx_graph.number_of_edges(),
-            "is_connected": nx.is_connected(graph.nx_graph.to_undirected()),
-            "number_of_connected_components": nx.number_connected_components(graph.nx_graph.to_undirected())
-        }
+        try:
+            import networkx as nx
+            analysis["network_analysis"] = {
+                "graph_density": nx.density(graph.nx_graph),
+                "number_of_nodes": graph.nx_graph.number_of_nodes(),
+                "number_of_edges": graph.nx_graph.number_of_edges(),
+                "is_connected": nx.is_connected(graph.nx_graph.to_undirected()) if graph.nx_graph.number_of_nodes() > 0 else False,
+                "number_of_connected_components": nx.number_connected_components(graph.nx_graph.to_undirected()) if graph.nx_graph.number_of_nodes() > 0 else 0
+            }
+        except Exception as e:
+            logging.warning(f"网络分析失败: {e}")
+            analysis["network_analysis"] = {
+                "graph_density": 0.0,
+                "number_of_nodes": graph.nx_graph.number_of_nodes(),
+                "number_of_edges": graph.nx_graph.number_of_edges(),
+                "is_connected": False,
+                "number_of_connected_components": 0,
+                "error": str(e)
+            }
         
         # 保存分析结果
         analysis_file = output_dir / f"{sample_id}_detailed_analysis.json"
@@ -599,36 +613,44 @@ class LoCoMoEntityExtractor:
         
         print(f"✅ 详细分析已保存到: {analysis_file}")
         
-        # 生成简要报告
+        # 生成简要报告 - 添加安全检查
+        entity_analysis = analysis.get("entity_analysis", {})
+        relationship_analysis = analysis.get("relationship_analysis", {})
+        network_analysis = analysis.get("network_analysis", {})
+        
         report_lines = [
             f"=== {sample_id} 实体关系抽取报告 ===",
             f"处理时间: {analysis['analysis_timestamp']}",
             f"",
             f"📊 实体统计:",
-            f"  - 总实体数: {analysis['entity_analysis'].get('total_entities', 0)}",
+            f"  - 总实体数: {entity_analysis.get('total_entities', 0)}",
         ]
         
-        for entity_type, count in analysis['entity_analysis'].get('entity_type_distribution', {}).items():
+        for entity_type, count in entity_analysis.get('entity_type_distribution', {}).items():
             report_lines.append(f"  - {entity_type}: {count} 个")
         
         report_lines.extend([
             f"",
             f"🔗 关系统计:",
-            f"  - 总关系数: {analysis['relationship_analysis'].get('total_relationships', 0)}",
+            f"  - 总关系数: {relationship_analysis.get('total_relationships', 0)}",
         ])
         
-        for rel_type, count in analysis['relationship_analysis'].get('relationship_type_distribution', {}).items():
+        for rel_type, count in relationship_analysis.get('relationship_type_distribution', {}).items():
             report_lines.append(f"  - {rel_type}: {count} 个")
         
         report_lines.extend([
             f"",
             f"🕸️ 网络特征:",
-            f"  - 节点数: {analysis['network_analysis']['number_of_nodes']}",
-            f"  - 边数: {analysis['network_analysis']['number_of_edges']}",
-            f"  - 图密度: {analysis['network_analysis']['graph_density']:.4f}",
-            f"  - 连通性: {'是' if analysis['network_analysis']['is_connected'] else '否'}",
-            f"  - 连通组件数: {analysis['network_analysis']['number_of_connected_components']}",
+            f"  - 节点数: {network_analysis.get('number_of_nodes', 0)}",
+            f"  - 边数: {network_analysis.get('number_of_edges', 0)}",
+            f"  - 图密度: {network_analysis.get('graph_density', 0.0):.4f}",
+            f"  - 连通性: {'是' if network_analysis.get('is_connected', False) else '否'}",
+            f"  - 连通组件数: {network_analysis.get('number_of_connected_components', 0)}",
         ])
+        
+        # 如果有错误，添加错误信息
+        if network_analysis.get('error'):
+            report_lines.append(f"  - 网络分析错误: {network_analysis['error']}")
         
         report_content = "\n".join(report_lines)
         
