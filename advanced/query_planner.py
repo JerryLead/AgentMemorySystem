@@ -9,7 +9,8 @@ from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import requests
 import re
 
-from core.Hippo import SemanticGraph, MemoryUnit
+from core.memory_unit import MemoryUnit
+from core.semantic_graph import SemanticGraph
 
 logging.basicConfig(
     format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO

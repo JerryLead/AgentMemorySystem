@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import MagicMock
-from advanced.QueryPlanner import QueryPlanner
-from core.stdHippo import SemanticGraph, MemoryUnit
+from advanced.query_planner import QueryPlanner
+from core.memory_unit import MemoryUnit
+from core.semantic_graph import SemanticGraph
 
 class TestEnd2EndIntegration(unittest.TestCase):
     def setUp(self):

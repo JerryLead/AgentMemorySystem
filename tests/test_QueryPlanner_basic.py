@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, Mock
-from advanced.QueryPlanner import QueryPlanner
+from advanced.query_planner import QueryPlanner
 
 
 class TestQueryPlannerBasic(unittest.TestCase):

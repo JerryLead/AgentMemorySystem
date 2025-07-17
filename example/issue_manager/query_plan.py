@@ -1,5 +1,5 @@
-from core.Hippo import SemanticGraph
-from advanced.QueryPlanner import QueryPlanner
+from core.semantic_graph import SemanticGraph
+from advanced.query_planner import QueryPlanner
 
 
 class IssueManagerQueryPlanner(QueryPlanner):
