@@ -86,7 +86,7 @@ posthog==3.25.0
 protobuf==5.29.3
 psycopg2-binary==2.9.10
 pyarrow==20.0.0
-pyautogen==0.9
+ag2==0.9
 pycparser==2.22
 pydantic==2.10.4
 pydantic_core==2.27.2
