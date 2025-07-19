@@ -1,4 +1,9 @@
+import sys
+from pathlib import Path
 from typing import List, Tuple, Dict, Any
+
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
 from dev import MemoryUnit
 
 class PromptBuilder:
