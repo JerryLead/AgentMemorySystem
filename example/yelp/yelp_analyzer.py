@@ -17,10 +17,10 @@ def tqdm_wrap(iterable, **kwargs):
         return iterable
 
 
-from core.MemoryUnit import MemoryUnit
-from core.MemorySpace import MemorySpace
-from core.SemanticMap import SemanticMap
-from core.SemanticGraph import SemanticGraph
+from core.memory_unit import MemoryUnit
+from core.memory_space import MemorySpace
+from core.semantic_map import SemanticMap
+from core.semantic_graph import SemanticGraph
 
 yelp_base_path = "/mnt/data1/home/guozy/gzy/datasets/yelp"
 yelp_dataset_path = os.path.join(yelp_base_path, "yelp_dataset")
@@ -38,7 +38,7 @@ tip_json = os.path.join(yelp_dataset_path, "yelp_academic_dataset_tip.json")  # 
 user_json = os.path.join(yelp_dataset_path, "yelp_academic_dataset_user.json")  # 用户
 photo_json = os.path.join(yelp_base_path, "yelp_photos/photos.json")  # 照片
 
-YELP_IMPORT_LIMIT = 1666  # None 表示全量导入，否则为采样上限
+YELP_IMPORT_LIMIT = 1000  # None 表示全量导入，否则为采样上限
 
 
 def count_lines(filepath):
@@ -350,7 +350,10 @@ def load_yelp_graph():
     print("[TEST] 开始简单向量检索测试（文本相似性）...")
     query_text = "good food"
     results = semantic_graph.search_similarity_in_graph(
-        query_text=query_text, top_k=3, ms_names=["review"]
+        query_text=query_text,
+        top_k=3,
+        ms_names=["review"],
+        return_score=True,
     )
     for i, (unit, score) in enumerate(results):
         print(
@@ -389,6 +392,6 @@ if __name__ == "__main__":
     main()
 
 # 导入数据
-# python -m example.yelp.yelp -i
+# python -m example.yelp.yelp_analyzer -i
 # 加载数据
-# python -m example.yelp.yelp
+# python -m example.yelp.yelp_analyzer

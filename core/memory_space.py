@@ -2,6 +2,7 @@ from typing import Optional, Set, Dict, Union, List, Tuple
 import logging
 import pickle
 import numpy as np
+import faiss
 
 from core.memory_unit import MemoryUnit
 
@@ -329,7 +330,6 @@ class MemorySpace:
     # 索引和搜索功能
     # ===============================
 
-
     def build_index(self, embedding_dim: int = 512, min_unit_threshold: int = 100):
         """
         递归收集所有unit并构建局部faiss索引。
@@ -354,7 +354,7 @@ class MemorySpace:
                 or getattr(semantic_map, "faiss_index_type", None)
                 or "IDMap,Flat"
             )
-            
+
             # 初始化FAISS索引
             if faiss_index_type.startswith("IDMap,"):
                 # 对于IDMap类型，需要特殊处理
@@ -363,58 +363,68 @@ class MemorySpace:
                 self._emb_index = faiss.IndexIDMap(base_index)
             else:
                 self._emb_index = faiss.index_factory(embedding_dim, faiss_index_type)
-            
+
             self._index_to_uid = {}
             embeddings = []
             ids = []  # 用于IndexIDMap
             count = 0
-            
+
             for unit in units:
-                if unit.embedding is not None and unit.embedding.shape[0] == embedding_dim:
+                if (
+                    unit.embedding is not None
+                    and unit.embedding.shape[0] == embedding_dim
+                ):
                     embeddings.append(unit.embedding)
                     self._index_to_uid[count] = unit.uid
                     ids.append(count)  # 使用计数作为ID
                     count += 1
-            
+
             if not embeddings:
                 logging.warning(
                     f"MemorySpace '{self.name}' 没有有效的embeddings来构建索引"
                 )
                 return
-            
+
             embeddings_np = np.array(embeddings, dtype=np.float32)
-            
+
             # 根据索引类型选择添加方法
             if faiss_index_type.startswith("IDMap,"):
                 # IndexIDMap类型必须使用add_with_ids
                 ids_np = np.array(ids, dtype=np.int64)
-                
+
                 # 检查是否需要训练
-                if hasattr(self._emb_index, 'is_trained') and not self._emb_index.is_trained:
+                if (
+                    hasattr(self._emb_index, "is_trained")
+                    and not self._emb_index.is_trained
+                ):
                     if "IVF" in faiss_index_type:
                         logging.info(f"训练MemorySpace '{self.name}' 的索引...")
                         self._emb_index.train(embeddings_np)
-                
+
                 self._emb_index.add_with_ids(embeddings_np, ids_np)
             else:
                 # 普通索引类型使用add
-                if hasattr(self._emb_index, 'is_trained') and not self._emb_index.is_trained:
+                if (
+                    hasattr(self._emb_index, "is_trained")
+                    and not self._emb_index.is_trained
+                ):
                     if "IVF" in faiss_index_type:
                         logging.info(f"训练MemorySpace '{self.name}' 的索引...")
                         self._emb_index.train(embeddings_np)
-                
+
                 self._emb_index.add(embeddings_np)
-            
+
             logging.info(
                 f"MemorySpace '{self.name}' 索引构建完成，包含 {count} 个向量 (faiss_index_type={faiss_index_type})"
             )
-            
+
         except ImportError:
             logging.error("FAISS不可用，无法构建本地索引")
         except Exception as e:
             logging.error(f"构建索引时出错: {e}")
             # 提供更详细的错误信息
             import traceback
+
             logging.debug(f"详细错误信息: {traceback.format_exc()}")
 
     def search_similarity_units_by_vector(
@@ -425,19 +435,19 @@ class MemorySpace:
         修复IndexIDMap的搜索逻辑。
         """
         semantic_map = self._get_semantic_map()
-        
+
         # 优先用索引
         if self._emb_index and getattr(self._emb_index, "ntotal", 0) > 0:
             try:
                 query_vector_np = query_vector.reshape(1, -1).astype(np.float32)
-                
+
                 # 检查索引类型
                 faiss_index_type = (
                     self._faiss_index_type
                     or getattr(semantic_map, "faiss_index_type", None)
                     or "IDMap,Flat"
                 )
-                
+
                 if faiss_index_type.startswith("IDMap,"):
                     # IndexIDMap返回的是实际的ID，不是索引位置
                     D, I = self._emb_index.search(query_vector_np, top_k)
@@ -474,16 +484,16 @@ class MemorySpace:
                                     f"索引中的UID '{uid}' 在SemanticMap中不存在"
                                 )
                     return results
-                    
+
             except Exception as e:
                 logging.error(f"索引搜索出错: {e}")
                 # 回退暴力搜索
-                
+
         # 暴力搜索
         units = self.get_all_units()
         if not units:
             return []
-        
+
         sims = []
         for u in units:
             if u.embedding is not None:
@@ -500,7 +510,7 @@ class MemorySpace:
                 except Exception as e:
                     logging.warning(f"计算相似度时出错: {e}")
                     continue
-        
+
         # 按距离排序（越小越相似）
         sims.sort(key=lambda x: x[1])
         return sims[:top_k]

@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List, Set, Tuple, Union
 import requests
 import re
+import json
 
 from core.memory_unit import MemoryUnit
 from core.semantic_graph import SemanticGraph
@@ -27,7 +28,268 @@ class QueryPlanner:
     ):
         ms_names = self.semantic_graph.get_all_memory_space_names()
         ms_structures = self.semantic_graph.get_memory_space_structures()
-        rel_types = self.semantic_graph.get_all_relations()
+        rel_types = self.semantic_graph.get_all_relations_with_samples(
+            samples_per_type=1
+        )
+
+        # 示例JSON片段单独保存，避免f-string嵌套过深
+        example_json = """
+{
+  "plan": [
+    {
+      "step": 1,
+      "operation": "get_units_in_memory_space",
+      "parameters": {
+        "ms_names": ["AI文档", "NLP相关"],
+        "recursive": true
+      },
+      "result_var": "candidate_units"
+    },
+    {
+      "step": 2,
+      "operation": "filter_memory_units",
+      "parameters": {
+        "candidate_units": "$candidate_units",
+        "filter_condition": {"type": {"eq": "论文"}}
+      },
+      "result_var": "filtered_papers"
+    },
+    {
+      "step": 3,
+      "operation": "deduplicate_units",
+      "parameters": {
+        "units": "$filtered_papers"
+      },
+      "result_var": "unique_papers"
+    },
+    {
+      "step": 4,
+      "operation": "get_explicit_neighbors",
+      "parameters": {
+        "uids": "$unique_papers.uid",
+        "rel_type": "corresponding_pr",
+        "ms_names": ["github_issues", "github_prs"],
+        "direction": "successors",
+        "recursive": true
+      },
+      "result_var": "related_prs"
+    }
+  ]
+}
+"""
+
+        apis_json_schema = """[
+  {
+    "name": "search_similarity_in_graph",
+    "description": "根据输入的自然语言查询，在所有候选 MemoryUnit 的 text_content 字段上进行语义相似性检索，返回指定 ms 及其子 ms 中最相似的 Top-K 记忆单元。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "candidate_units": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "候选记忆单元列表，可为 None 表示全图记忆单元。"
+        },
+        "query_text": {
+          "type": "str",
+          "description": "自然语言查询文本"
+        },
+        "top_k": {
+          "type": "int",
+          "description": "返回结果数量，默认为5",
+          "default": 5
+        },
+        "ms_names": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "指定记忆空间名称列表，可为 None 表示全图范围。"
+        }
+      },
+      "required": ["query_text"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "get_explicit_neighbors",
+    "description": "获取指定记忆单元的显式关系邻居节点，可限定ms范围。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "uids": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "源节点ID列表"
+        },
+        "rel_type": {
+          "type": "str",
+          "description": "关系类型筛选，可为 None"
+        },
+        "ms_names": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "指定记忆空间名称列表，可为 None 表示全图范围。"
+        },
+        "direction": {
+          "type": "str",
+          "enum": ["successors", "predecessors", "all"],
+          "description": "邻居方向，可选：successors（出边邻居）、predecessors（入边邻居）、all（双向邻居），默认为successors",
+          "default": "successors"
+        }
+      },
+      "required": ["uids"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "filter_memory_units",
+    "description": "通过特定字段的值和操作符过滤记忆单元，支持ms范围限定。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "candidate_units": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "候选记忆单元列表，可为 None 表示全图记忆单元。"
+        },
+        "filter_condition": {
+          "type": "dict",
+          "description": "过滤条件，每个字段必须为操作符字典，如 {'field': {'eq': value}}。\n\n支持的操作符如下：\n| 操作符         | 含义           |\n| -------------- | -------------- |\n| eq             | 等于           |\n| ne             | 不等于         |\n| in             | 属于列表/集合  |\n| nin            | 不属于列表/集合|\n| gt             | 大于           |\n| gte            | 大于等于       |\n| lt             | 小于           |\n| lte            | 小于等于       |\n| contain        | 包含（op_val in val，适用于list/set/str等）|\n| not_contain    | 不包含（op_val not in val，适用于list/set/str等）|\n\n示例：\n  {'type': {'eq': '论文'}}\n  {'year': {'gte': 2020, 'lte': 2024}}\n  {'tags': {'contain': 'AI'}}\n  {'author': {'in': ['张三', '李四']}}\n可为 None 表示无过滤。"
+        },
+        "ms_names": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "指定记忆空间名称列表，可为 None 表示全图范围。"
+        }
+      }
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "get_implicit_neighbors",
+    "description": "获取指定记忆单元（可为多个起点）的隐式关系邻居节点，可限定ms范围。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "uids": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "记忆单元ID列表（支持多个起点）"
+        },
+        "top_k": {
+          "type": "int",
+          "description": "返回的邻居数量，默认为5",
+          "default": 5
+        },
+        "ms_names": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "指定记忆空间名称列表，可为 None 表示全图范围。"
+        }
+      },
+      "required": ["uids"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "get_units_in_memory_space",
+    "description": "获取指定ms及其子ms下所有unit。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "ms_names": {
+          "type": "list",
+          "items": { "type": "str" },
+          "description": "记忆空间名称列表"
+        }
+      },
+      "required": ["ms_names"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "deduplicate_units",
+    "description": "对unit列表去重，避免重叠带来的重复。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "units": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "记忆单元列表"
+        }
+      },
+      "required": ["units"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "aggregate_results",
+    "description": "对查询结果进行聚合操作，统计记忆单元的出现频率。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "memory_units": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "记忆单元列表"
+        }
+      },
+      "required": ["memory_units"]
+    },
+    "returns": "dict"
+  },
+  {
+    "name": "units_union",
+    "description": "支持多个MemorySpace、MemoryUnit列表、UID列表的并集，返回去重后的MemoryUnit列表。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "args": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "支持多种类型的参数：MemoryUnit对象、UID字符串、MemorySpace对象、MemoryUnit列表、上述类型的混合list/tuple/set"
+        }
+      },
+      "required": ["args"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "units_intersection",
+    "description": "支持多个MemorySpace、MemoryUnit列表、UID列表的交集，返回去重后的MemoryUnit列表。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "args": {
+          "type": "list",
+          "items": { "type": "dict" },
+          "description": "支持多种类型的参数（同units_union）"
+        }
+      },
+      "required": ["args"]
+    },
+    "returns": "list[MemoryUnit]"
+  },
+  {
+    "name": "units_difference",
+    "description": "返回arg1中有而arg2中没有的unit（按uid），支持MemorySpace、MemoryUnit列表、UID列表。",
+    "parameters": {
+      "type": "dict",
+      "properties": {
+        "arg1": {
+          "type": "dict",
+          "description": "第一个参数，支持多种类型（同units_union）"
+        },
+        "arg2": {
+          "type": "dict",
+          "description": "第二个参数，支持多种类型（同units_union）"
+        }
+      },
+      "required": ["arg1", "arg2"]
+    },
+    "returns": "list[MemoryUnit]"
+  }
+]"""
 
         prompt = f"""
 # SemanticGraph查询计划生成任务
@@ -54,151 +316,32 @@ MemoryUnit之间存在两种连接方式：
 
 ### 记忆空间嵌套结构（unit可重叠）
 ```
-{str(ms_structures)}
+{json.dumps(ms_structures, indent=4)}
 ```
 - 注意：同一个unit可能出现在多个ms中，查询时可指定ms范围或合并结果。
 
 ### 显式关系边的类型
 ```
-{str(rel_types)}
+{json.dumps(rel_types, indent=4)}
 ```
 
-## 可用的查询API
-
-1. **search_similarity_in_graph(query_text, top_k=5, ms_names=None, recursive=True)**
-   - 功能：根据输入的自然语言查询，返回指定ms及其子ms中语义最相似的Top-K个记忆单元。
-   - 参数：
-     - `query_text` (str): 自然语言查询文本
-     - `top_k` (int): 返回结果数量，默认为5
-     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
-     - `recursive` (bool): 是否递归包含子ms，默认为True
-   - 返回：记忆单元列表
-
-2. **get_explicit_neighbors(uids, rel_type=None, ms_names=None, direction="successors", recursive=True)**
-   - 功能：获取指定记忆单元的显式关系邻居节点，可限定ms范围。
-   - 参数：
-     - `uids` (List[str]): 源节点ID列表
-     - `rel_type` (Optional[str]): 关系类型筛选
-     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
-     - `direction` (str): 邻居方向，可选："successors"(出边邻居)，"predecessors"(入边邻居)，"all"(双向邻居)，默认为"successors"
-     - `recursive` (bool): 是否递归包含子ms，默认为True
-   - 返回：记忆单元列表
-
-3. **filter_memory_units(candidate_units=None, filter_condition=None, ms_names=None, recursive=True)**
-   - 功能：通过特定字段的值和操作符过滤记忆单元，支持ms范围限定。
-   - 参数：
-     - `candidate_units` (Optional[List[MemoryUnit]]): 候选记忆单元列表，若为None则使用全图记忆单元
-     - `filter_condition` (Optional[Dict]): 过滤条件，**每个字段必须为操作符字典**，如：
-       `{{ "field": {{"eq": value}} }}`、`{{"field": {{"in": [v1, v2]}}}}`、`{{"field": {{"gte": 2020, "lte": 2024}}}}`
-       支持的操作符有：
-         - `eq`（等于）
-         - `ne`（不等于）
-         - `in`（属于列表/集合）
-         - `nin`（不属于列表/集合）
-         - `gt`（大于）
-         - `gte`（大于等于）
-         - `lt`（小于）
-         - `lte`（小于等于）
-         - `contain`（op_val in val，适用于val为list/set/str等可迭代对象）
-         - `not_contain`（op_val not in val，适用于val为list/set/str等可迭代对象）
-     - `ms_names` (Optional[List[str]]): 指定记忆空间名称列表，若不指定则在全图范围内查找
-     - `recursive` (bool): 是否递归包含子ms，默认为True
-   - 返回：过滤后的记忆单元列表
-
-4. **get_implicit_neighbors(uids, top_k=5, ms_names=None, recursive=True)**
-   - 功能：获取指定记忆单元（可为多个起点）的隐式关系邻居节点，可限定ms范围。
-   - 参数：
-     - uids: 记忆单元ID列表（支持多个起点）
-     - top_k: 返回的邻居数量，默认为5
-     - ms_names: 指定记忆空间名称列表，若不指定则在全图范围内查找
-     - recursive: 是否递归包含子ms，默认为True
-   - 返回：记忆单元列表
-
-5. **get_units_in_memory_space(ms_names, recursive=True)**
-   - 功能：获取指定ms及其子ms下所有unit。
-   - 参数：
-     - ms_names: 记忆空间名称列表
-     - recursive: 是否递归包含子ms，默认为True
-   - 返回：记忆单元列表
-
-6. **deduplicate_units(units)**
-   - 功能：对unit列表去重，避免重叠带来的重复。
-   - 参数：
-     - units: 记忆单元列表
-   - 返回：去重后的记忆单元列表
-
-7. **aggregate_results(memory_units)**
-   - 功能：对查询结果进行聚合操作，统计记忆单元的出现频率
-   - 参数：
-     - memory_units: 记忆单元列表
-   - 返回：聚合结果，记忆单元出现频率
-
-8. **units_union(*args)**
-   - 功能：支持多个MemorySpace、MemoryUnit列表、UID列表的并集，返回去重后的MemoryUnit列表
-   - 参数：
-     - *args: 支持多种类型的参数：
-       - MemoryUnit对象
-       - UID字符串（单个或列表）
-       - MemorySpace对象
-       - MemoryUnit列表
-       - 上述类型的混合列表/元组/集合
-   - 返回：去重后的MemoryUnit列表
-
-9. **units_intersection(*args)**
-   - 功能：支持多个MemorySpace、MemoryUnit列表、UID列表的交集，返回去重后的MemoryUnit列表
-   - 参数：
-     - *args: 支持多种类型的参数（同units_union）
-   - 返回：去重后的MemoryUnit列表（取第一个参数的unit对象）
-
-10. **units_difference(arg1, arg2)**
-    - 功能：返回arg1中有而arg2中没有的unit（按uid），支持MemorySpace、MemoryUnit列表、UID列表
-    - 参数：
-      - arg1: 第一个参数，支持多种类型（同units_union）
-      - arg2: 第二个参数，支持多种类型（同units_union）
-    - 返回：arg1中有而arg2中没有的MemoryUnit列表
+## 可用的查询API（function call 规范，OpenAI/JSON Schema风格）
+```json
+{apis_json_schema}
+```
 
 ## 查询计划格式与变量引用规则
 
-查询计划采用JSON格式，支持步骤间的变量引用机制：
-
 ### 变量引用规则
-- 使用 `$变量名` 引用之前步骤的完整结果
-- 使用 `$变量名.属性名` 引用结果中的特定属性
-- 支持嵌套属性访问：`$变量名.属性1.属性2`
+- 使用 `$变量名` 引用之前步骤的完整结果（如MemoryUnit对象列表）
+- 使用 `$变量名.属性名` 引用结果中的特定属性（如 $similar_issues.uid 表示提取MemoryUnit对象列表的uid字段，返回UID列表）
+- 支持嵌套属性访问：`$变量名.属性`
 - 支持跨ms、合并多个ms结果
+- **如API参数类型为UID列表，必须用 $变量名.uid 提取UID列表，不能直接传MemoryUnit对象列表**
 
 ### 格式示例
 ```json
-{{
-  "plan": [
-    {{
-      "step": 1,
-      "operation": "get_units_in_memory_space",
-      "parameters": {{
-        "ms_names": ["AI文档", "NLP相关"],
-        "recursive": true
-      }},
-      "result_var": "candidate_units"
-    }},
-    {{
-      "step": 2,
-      "operation": "filter_memory_units",
-      "parameters": {{
-        "candidate_units": "$candidate_units",
-        "filter_condition": {{"type": {{"eq": "论文"}}}}
-      }},
-      "result_var": "filtered_papers"
-    }},
-    {{
-      "step": 3,
-      "operation": "deduplicate_units",
-      "parameters": {{
-        "units": "$filtered_papers"
-      }},
-      "result_var": "unique_papers"
-    }}
-  ]
-}}
+{example_json}
 ```
 
 ## 任务要求
@@ -215,6 +358,7 @@ MemoryUnit之间存在两种连接方式：
 - 只输出JSON格式的查询计划，不需要解释或说明过程
 - 确保JSON格式正确无误，可以被程序直接解析
 - 合理使用变量引用机制，提高查询效率
+- **所有API参数类型必须严格匹配**，如需UID列表请用 $变量名.uid 方式提取，不能直接传MemoryUnit对象列表
 - 确保查询计划能够准确回答用户的问题
 """
         return prompt

@@ -826,7 +826,7 @@ class SemanticMap:
             _collect_names(space)
         return list(result)
 
-    def get_memory_space_structures(self) -> List[dict]:
+    def get_memory_space_structures(self,samples_per_space: int = 2) -> List[dict]:
         """
         递归导出所有MemorySpace嵌套结构（树/嵌套dict），
         每个ms展示：名称、unit uid列表、所有unit的raw_data字段全集、子空间。
@@ -836,10 +836,10 @@ class SemanticMap:
         def _struct(space: MemorySpace):
             # 采样本space下部分unit的uid和raw_data字段全集
             unit_uids = list(space.get_unit_uids())
-            # 采样最多5个uid
-            if len(unit_uids) > 5:
+            # 采样
+            if len(unit_uids) > samples_per_space:
                 import random
-                unit_uids = random.sample(unit_uids, 5)
+                unit_uids = random.sample(unit_uids, samples_per_space)
             unit_fields = set()
             for uid in unit_uids:
                 unit = self.memory_units.get(uid)

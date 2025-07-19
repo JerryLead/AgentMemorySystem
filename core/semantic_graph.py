@@ -34,7 +34,7 @@ class SemanticGraph:
         self.nx_graph: nx.DiGraph = (
             nx.DiGraph()
         )  # 使用 NetworkX有向图存储节点和显式关系
-        self.rel_types: Set[str] = set()  # 存储所有已注册的关系类型
+        # self.rel_types: Set[str] = set()  # 移除关系类型集合
         logging.info("SemanticGraph 已初始化。")
 
         # 添加Neo4j连接跟踪
@@ -281,7 +281,7 @@ class SemanticGraph:
         self._modified_relationships.add((src_id, tgt_id, relationship_name))
 
         # 记录关系类型
-        self.rel_types.add(relationship_name)
+        # self.rel_types.add(relationship_name) # 移除
 
         logging.info(
             f"已添加从 '{src_id}' 到 '{tgt_id}' 的关系 '{relationship_name}'。"
@@ -347,15 +347,18 @@ class SemanticGraph:
             # 如果内存中没有，尝试从Neo4j加载
             if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
                 try:
-                    relationship_data = self._neo4j_connection.get_relationship(
-                        source_uid, target_uid, relationship_type
+                    rels = self._neo4j_connection.get_relationships(
+                        source_id=source_uid,
+                        target_id=target_uid,
+                        relationship_type=relationship_type,
+                        limit=1,
                     )
-                    if relationship_data:
+                    if rels:
+                        relationship_data = rels[0].get("properties", {})
                         # 添加到内存缓存
                         self.swap_in_relationship(
                             source_uid, target_uid, relationship_type, relationship_data
                         )
-
                         # 如果NetworkX图中没有这个关系，也添加进去
                         if not self.nx_graph.has_edge(source_uid, target_uid):
                             edge_attributes = {
@@ -374,7 +377,6 @@ class SemanticGraph:
                             self.nx_graph.add_edge(
                                 source_uid, target_uid, **edge_attributes
                             )
-
                         return relationship_data
                 except Exception as e:
                     logging.warning(f"从Neo4j加载关系失败: {e}")
@@ -535,22 +537,33 @@ class SemanticGraph:
         ms_names: Optional[List[str]] = None,
         recursive: bool = True,
         return_score: bool = False,  # 新增参数，默认为False
+        candidate_units: Optional[List[Any]] = None,  # 新增参数，支持MemoryUnit或uid
     ):
         normed = None
         if ms_names:
             normed = [(n[3:] if n.startswith("ms:") else n) for n in ms_names]
 
+        # 处理 candidate_units，转换为 candidate_uids
+        candidate_uids = None
+        if candidate_units is not None:
+            candidate_uids = []
+            for u in candidate_units:
+                if hasattr(u, "uid"):
+                    candidate_uids.append(u.uid)
+                else:
+                    candidate_uids.append(str(u))
+
         if query_text is not None:
             results = self.semantic_map.search_similarity_by_text(
-                query_text, top_k, normed
+                query_text, top_k, normed, candidate_uids
             )
         elif query_embedding is not None:
             results = self.semantic_map.search_similarity_by_vector(
-                query_embedding, top_k, normed
+                query_embedding, top_k, normed, candidate_uids
             )
         elif query_image_path is not None:
             results = self.semantic_map.search_similarity_by_image(
-                query_image_path, top_k, normed
+                query_image_path, top_k, normed, candidate_uids
             )
         else:
             logging.warning(
@@ -709,16 +722,21 @@ class SemanticGraph:
                 properties = self._relationship_cache.get(rel_key, {})
 
                 # 同步到Neo4j数据库
-                if self._neo4j_connection.add_relationship(
-                    source_uid, target_uid, rel_type, properties
-                ):
-                    synced_count += 1
-                    logging.debug(
-                        f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 已同步到Neo4j"
-                    )
+                if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
+                    if self._neo4j_connection.add_relationship(
+                        source_uid, target_uid, rel_type, properties=properties
+                    ):
+                        synced_count += 1
+                        logging.debug(
+                            f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 已同步到Neo4j"
+                        )
+                    else:
+                        logging.warning(
+                            f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 同步到Neo4j失败"
+                        )
                 else:
                     logging.warning(
-                        f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 同步到Neo4j失败"
+                        f"未连接到Neo4j，无法同步关系 ({source_uid} -[{rel_type}]-> {target_uid})"
                     )
 
                 # 从内存缓存中移除关系
@@ -869,27 +887,36 @@ class SemanticGraph:
                     if k not in ["type", "created", "updated"]
                 }
 
-                # 确保节点存在
-                if not self._neo4j_connection.ensure_node_exists(source_uid):
-                    logging.warning(f"确保源节点 '{source_uid}' 存在失败")
-                if not self._neo4j_connection.ensure_node_exists(target_uid):
-                    logging.warning(f"确保目标节点 '{target_uid}' 存在失败")
+                if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
+                    if not self._neo4j_connection.ensure_node_exists(
+                        source_uid, node_type="MemoryUnit"
+                    ):
+                        logging.warning(f"确保源节点 '{source_uid}' 存在失败")
+                    if not self._neo4j_connection.ensure_node_exists(
+                        target_uid, node_type="MemoryUnit"
+                    ):
+                        logging.warning(f"确保目标节点 '{target_uid}' 存在失败")
 
-                # 同步到Neo4j
-                if self._neo4j_connection.add_relationship(
-                    source_uid, target_uid, rel_type, properties
-                ):
-                    stats["relationships_synced"] += 1
-                    self._modified_relationships.discard(
-                        (source_uid, target_uid, rel_type)
-                    )
-                    logging.debug(
-                        f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 已同步到Neo4j"
-                    )
+                    # 同步到Neo4j
+                    if self._neo4j_connection.add_relationship(
+                        source_uid, target_uid, rel_type, properties=properties
+                    ):
+                        stats["relationships_synced"] += 1
+                        self._modified_relationships.discard(
+                            (source_uid, target_uid, rel_type)
+                        )
+                        logging.debug(
+                            f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 已同步到Neo4j"
+                        )
+                    else:
+                        stats["relationships_failed"] += 1
+                        logging.warning(
+                            f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 同步到Neo4j失败"
+                        )
                 else:
                     stats["relationships_failed"] += 1
                     logging.warning(
-                        f"关系 ({source_uid} -[{rel_type}]-> {target_uid}) 同步到Neo4j失败"
+                        f"未连接到Neo4j，无法同步关系 ({source_uid} -[{rel_type}]-> {target_uid})"
                     )
 
             except Exception as e:
@@ -904,26 +931,32 @@ class SemanticGraph:
             logging.info(f"处理 {len(deleted_relationships)} 个已删除的关系")
 
             for source_uid, target_uid, rel_type in deleted_relationships:
-                try:
-                    if self._neo4j_connection.delete_relationship(
-                        source_uid, target_uid, rel_type
-                    ):
-                        stats["relationships_synced"] += 1
-                        self._deleted_relationships.discard(
-                            (source_uid, target_uid, rel_type)
-                        )
-                        logging.debug(
-                            f"已删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 从Neo4j中移除"
-                        )
-                    else:
+                if self._neo4j_connection and self._neo4j_connection.neo4j_connected:
+                    try:
+                        if self._neo4j_connection.delete_relationship(
+                            source_uid, target_uid, relationship_type=rel_type
+                        ):
+                            stats["relationships_synced"] += 1
+                            self._deleted_relationships.discard(
+                                (source_uid, target_uid, rel_type)
+                            )
+                            logging.debug(
+                                f"已删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 从Neo4j中移除"
+                            )
+                        else:
+                            stats["relationships_failed"] += 1
+                            logging.warning(
+                                f"从Neo4j删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 失败"
+                            )
+                    except Exception as e:
                         stats["relationships_failed"] += 1
-                        logging.warning(
-                            f"从Neo4j删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 失败"
+                        logging.error(
+                            f"从Neo4j删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 时出错: {e}"
                         )
-                except Exception as e:
+                else:
                     stats["relationships_failed"] += 1
-                    logging.error(
-                        f"从Neo4j删除关系 ({source_uid} -[{rel_type}]-> {target_uid}) 时出错: {e}"
+                    logging.warning(
+                        f"未连接到Neo4j，无法删除关系 ({source_uid} -[{rel_type}]-> {target_uid})"
                     )
 
         return stats
@@ -962,9 +995,44 @@ class SemanticGraph:
 
     def get_all_relations(self) -> List[str]:
         """
-        返回所有已注册的显式关系类型列表。
+        返回所有已注册的显式关系类型列表（动态收集）。
         """
-        return list(self.rel_types)
+        rel_types = set()
+        for _, _, data in self.nx_graph.edges(data=True):
+            rel_type = data.get("type")
+            if rel_type:
+                rel_types.add(rel_type)
+        return list(rel_types)
+
+    def get_all_relations_with_samples(self, samples_per_type: int = 2) -> dict:
+        # 1. 分类收集所有边
+        rel_samples = {}
+        seen_pairs = set()
+        for u, v, data in self.nx_graph.edges(data=True):
+            rel_type = data.get("type")
+            if not rel_type:
+                continue
+            # 2. 检查是否已收集足够样本
+            if rel_type not in rel_samples:
+                rel_samples[rel_type] = []
+            if len(rel_samples[rel_type]) >= samples_per_type:
+                continue
+            # 3. 判断是否为双向
+            if (v, u, rel_type) in seen_pairs:
+                # 已经作为双向收录过
+                continue
+            if self.nx_graph.has_edge(v, u):
+                rev_data = self.nx_graph.get_edge_data(v, u)
+                if rev_data and rev_data.get("type") == rel_type:
+                    # 双向
+                    rel_samples[rel_type].append(f"{u} <-> {v}")
+                    seen_pairs.add((u, v, rel_type))
+                    seen_pairs.add((v, u, rel_type))
+                    continue
+            # 单向
+            rel_samples[rel_type].append(f"{u} -> {v}")
+            seen_pairs.add((u, v, rel_type))
+        return rel_samples
 
     def traverse_explicit_nodes(
         self,
@@ -1359,11 +1427,7 @@ class SemanticGraph:
 
         logging.info(f"SemanticGraph 已从目录 '{directory_path}' 加载。")
         # 自动恢复 rel_types
-        instance.rel_types = set()
-        for _, _, data in instance.nx_graph.edges(data=True):
-            rel_type = data.get("type")
-            if rel_type:
-                instance.rel_types.add(rel_type)
+        # instance.rel_types = set() # 移除
         return instance
 
     # ==============================
