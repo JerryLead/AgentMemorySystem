@@ -1200,20 +1200,22 @@ def evaluate_answer_comprehensive(question: str,
                                 gold_answer: str,
                                 predicted_answer: str,
                                 context: str = "",
-                                llm_client=None,
+                                llm_client: Optional[LLMClient] = None,
                                 include_llm_judgment: bool = False,
-                                evaluation_options: Optional[List[str]] = None) -> Dict[str, Any]:
+                                evaluation_options: Optional[List[str]] = None,
+                                llm_runs: int = 1) -> Dict[str, Any]:
     """
-    综合答案评估接口
+    综合答案评估接口（适配LLMClient）
     
     Args:
         question: 问题
         gold_answer: 标准答案
         predicted_answer: 预测答案
         context: 上下文
-        llm_client: LLM客户端（可选）
+        llm_client: LLMClient实例（可选）
         include_llm_judgment: 是否包含LLM判断
         evaluation_options: 评估选项
+        llm_runs: LLM评估运行次数
         
     Returns:
         综合评估结果
@@ -1226,12 +1228,21 @@ def evaluate_answer_comprehensive(question: str,
         gold_answer, predicted_answer, context, evaluation_options
     )
     
-    # LLM判断（如果启用）
+    # LLM判断（如果启用且提供了客户端）
     if include_llm_judgment and llm_client is not None:
-        llm_result = calculate_llm_judgment(
-            llm_client, question, gold_answer, predicted_answer
-        )
-        result["llm_judgment"] = llm_result
+        try:
+            llm_result = calculate_llm_judgment(
+                llm_client, question, gold_answer, predicted_answer, llm_runs
+            )
+            result["llm_judgment"] = llm_result
+        except Exception as e:
+            logging.error(f"LLM判断失败: {e}")
+            result["llm_judgment"] = {
+                "error": str(e),
+                "accuracy": 0.0,
+                "num_runs": llm_runs,
+                "consistency": False
+            }
     
     # 转换numpy类型
     result = convert_numpy_types(result)
@@ -1290,14 +1301,14 @@ def example_llm_grader_usage():
     )
     print(f"LLM判断详情: {llm_judgment}")
     
-    # 综合评估（包含LLM判断）
+    # 综合评估（包含LLM判断）- 修复参数名
     comprehensive_result = evaluate_answer_comprehensive(
         question=question,
         gold_answer=gold_answer,
         predicted_answer=predicted_answer,
         llm_client=llm_client,
         include_llm_judgment=True,
-        llm_runs=2
+        llm_runs=2  # 现在这个参数应该能正常工作
     )
     print(f"综合评估结果: {json.dumps(comprehensive_result, indent=2)}")
 
